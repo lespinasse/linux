@@ -133,7 +133,8 @@ int hugetlb_report_node_meminfo(int, char *);
 void hugetlb_show_meminfo(void);
 unsigned long hugetlb_total_pages(void);
 vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
-			unsigned long address, unsigned int flags);
+			unsigned long address, unsigned int flags,
+			struct mmap_read_range *range);
 int hugetlb_mcopy_atomic_pte(struct mm_struct *dst_mm, pte_t *dst_pte,
 				struct vm_area_struct *dst_vma,
 				unsigned long dst_addr,
@@ -362,7 +363,7 @@ static inline void __unmap_hugepage_range(struct mmu_gather *tlb,
 
 static inline vm_fault_t hugetlb_fault(struct mm_struct *mm,
 			struct vm_area_struct *vma, unsigned long address,
-			unsigned int flags)
+			unsigned int flags, struct mmap_read_range *range)
 {
 	BUG();
 	return 0;

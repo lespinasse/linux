@@ -4320,7 +4320,8 @@ int huge_add_to_page_cache(struct page *page, struct address_space *mapping,
 static vm_fault_t hugetlb_no_page(struct mm_struct *mm,
 			struct vm_area_struct *vma,
 			struct address_space *mapping, pgoff_t idx,
-			unsigned long address, pte_t *ptep, unsigned int flags)
+			unsigned long address, pte_t *ptep, unsigned int flags,
+			struct mmap_read_range *range)
 {
 	struct hstate *h = hstate_vma(vma);
 	vm_fault_t ret = VM_FAULT_SIGBUS;
@@ -4364,6 +4365,7 @@ retry:
 				.vma = vma,
 				.address = haddr,
 				.flags = flags,
+				.range = range,
 				/*
 				 * Hard to debug if it ends up being
 				 * used by a callee that assumes
@@ -4527,7 +4529,8 @@ u32 hugetlb_fault_mutex_hash(struct address_space *mapping, pgoff_t idx)
 #endif
 
 vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
-			unsigned long address, unsigned int flags)
+			unsigned long address, unsigned int flags,
+			struct mmap_read_range *range)
 {
 	pte_t *ptep, entry;
 	spinlock_t *ptl;
@@ -4587,7 +4590,8 @@ vm_fault_t hugetlb_fault(struct mm_struct *mm, struct vm_area_struct *vma,
 
 	entry = huge_ptep_get(ptep);
 	if (huge_pte_none(entry)) {
-		ret = hugetlb_no_page(mm, vma, mapping, idx, address, ptep, flags);
+		ret = hugetlb_no_page(mm, vma, mapping, idx, address, ptep,
+				      flags, range);
 		goto out_mutex;
 	}
 
@@ -4900,7 +4904,7 @@ long follow_hugetlb_page(struct mm_struct *mm, struct vm_area_struct *vma,
 				 */
 				fault_flags |= FAULT_FLAG_TRIED;
 			}
-			ret = hugetlb_fault(mm, vma, vaddr, fault_flags);
+			ret = hugetlb_fault(mm, vma, vaddr, fault_flags, NULL);
 			if (ret & VM_FAULT_ERROR) {
 				err = vm_fault_to_errno(ret, flags);
 				remainder = 0;
