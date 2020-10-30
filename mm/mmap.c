@@ -418,6 +418,16 @@ static void validate_mm(struct mm_struct *mm)
 			  mm->highest_vm_end, highest_address);
 		bug = 1;
 	}
+	if (mm->mmap != NULL && mm->mmap->vm_start < FIRST_USER_ADDRESS) {
+		pr_emerg("lowest address %lx, FIRST_USER_ADDRESS %lx\n",
+			 mm->mmap->vm_start, FIRST_USER_ADDRESS);
+		bug = 1;
+	}
+	if (highest_address > TASK_SIZE) {
+		pr_emerg("highest address %lx, TASK_SIZE %lx\n",
+			 highest_address, TASK_SIZE);
+		bug = 1;
+	}
 	i = browse_rb(mm);
 	if (i != mm->map_count) {
 		if (i != -1)
