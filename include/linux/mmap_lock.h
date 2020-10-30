@@ -17,6 +17,7 @@
 	.mutex = __MUTEX_INITIALIZER((name).mmap_lock.mutex),	\
 	.head = LIST_HEAD_INIT((name).mmap_lock.head),		\
 	.coarse_count = 0,					\
+	.fine_writers = 0,					\
 	MMAP_LOCK_DEP_MAP_INITIALIZER((name).mmap_lock)		\
 },
 
@@ -27,6 +28,7 @@ static inline void mmap_init_lock(struct mm_struct *mm)
 	mutex_init(&mm->mmap_lock.mutex);
 	INIT_LIST_HEAD(&mm->mmap_lock.head);
 	mm->mmap_lock.coarse_count = 0;
+	mm->mmap_lock.fine_writers = 0;
 	lockdep_init_map(&mm->mmap_lock.dep_map, "&mm->mmap_lock", &__key, 0);
 }
 
@@ -52,12 +54,14 @@ static inline void mmap_assert_locked(struct mm_struct *mm)
 {
 	lockdep_assert_held(&mm->mmap_lock);
 	VM_BUG_ON_MM(!mm->mmap_lock.coarse_count, mm);
+	VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
 }
 
 static inline void mmap_assert_write_locked(struct mm_struct *mm)
 {
 	lockdep_assert_held_write(&mm->mmap_lock);
 	VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
+	VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
 }
 
 

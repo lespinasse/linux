@@ -112,7 +112,7 @@ EXPORT_SYMBOL(mmap_f_lock_killable_slow);
 
 static inline bool writer_f(struct mm_struct *mm, struct mmap_lock_waiter *w)
 {
-	if (mm->mmap_lock.coarse_count)
+	if (mm->mmap_lock.coarse_count || mm->mmap_lock.fine_writers)
 		return false;
 	mm->mmap_lock.coarse_count = -1;
 	return true;
@@ -120,7 +120,7 @@ static inline bool writer_f(struct mm_struct *mm, struct mmap_lock_waiter *w)
 
 static inline bool reader_f(struct mm_struct *mm, struct mmap_lock_waiter *w)
 {
-	if (mm->mmap_lock.coarse_count < 0)
+	if (mm->mmap_lock.coarse_count < 0 || mm->mmap_lock.fine_writers)
 		return false;
 	mm->mmap_lock.coarse_count++;
 	return true;
@@ -199,6 +199,7 @@ void mmap_write_unlock(struct mm_struct *mm)
 {
 	mmap_vma_lock(mm);
 	VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
+	VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
 	mm->mmap_lock.coarse_count = 0;
 	mmap_vma_f_unlock(mm, true);
 }
@@ -210,6 +211,7 @@ void mmap_write_downgrade(struct mm_struct *mm)
 
 	mmap_vma_lock(mm);
 	VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
+	VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
 	mm->mmap_lock.coarse_count = 1;
 	if (!list_empty(&mm->mmap_lock.head))
 		mmap_lock_dequeue(mm, &wake_q);
@@ -273,6 +275,7 @@ void mmap_read_unlock(struct mm_struct *mm)
 {
 	mmap_vma_lock(mm);
 	VM_BUG_ON_MM(mm->mmap_lock.coarse_count <= 0, mm);
+	VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
 	mm->mmap_lock.coarse_count--;
 	mmap_vma_f_unlock(mm, !mm->mmap_lock.coarse_count);
 }

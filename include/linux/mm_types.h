@@ -304,6 +304,7 @@ struct mmap_lock {
 	struct mutex mutex;
 	struct list_head head;
 	long coarse_count;	/* Coarse readers, or -1 for coarse writer. */
+	long fine_writers;	/* Number of fine grained writers. */
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map dep_map;
 #endif
