@@ -868,4 +868,12 @@ config ARCH_HAS_HUGEPD
 config MAPPING_DIRTY_HELPERS
         bool
 
+config MMAP_LOCK_QUEUED
+	bool "queued mmap_lock implementation"
+	def_bool y
+
+	help
+	  Implement the mmap lock as a queue of reader/writer lockers.
+	  This prepares for extending the api to support fine grained ranges.
+
 endmenu

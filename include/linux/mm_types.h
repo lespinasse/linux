@@ -297,6 +297,20 @@ struct vm_userfaultfd_ctx {};
 #endif /* CONFIG_USERFAULTFD */
 
 /*
+ * struct mmap_lock implements a queued mmap_lock.
+ */
+#ifdef CONFIG_MMAP_LOCK_QUEUED
+struct mmap_lock {
+	struct mutex mutex;
+	struct list_head head;
+	long count;	/* readers count, or -1 when write locked. */
+#ifdef CONFIG_DEBUG_LOCK_ALLOC
+	struct lockdep_map dep_map;
+#endif
+};
+#endif
+
+/*
  * This struct describes a virtual memory area. There is one of these
  * per VM-area/task. A VM area is any part of the process virtual memory
  * space that has a special rule for the page-fault handlers (ie a shared
@@ -454,7 +468,11 @@ struct mm_struct {
 		spinlock_t page_table_lock; /* Protects page tables and some
 					     * counters
 					     */
+#ifdef CONFIG_MMAP_LOCK_QUEUED
+		struct mmap_lock mmap_lock;
+#else
 		struct rw_semaphore mmap_lock;
+#endif
 
 		struct list_head mmlist; /* List of maybe swapped mm's.	These
 					  * are globally strung together off
