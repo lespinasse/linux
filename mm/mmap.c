@@ -3011,9 +3011,15 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	ctx.uf = uf;
 	ctx.downgrade = downgrade;
 	ctx.vmas = NULL;
+
+	if (!locked && mmap_write_lock_killable(mm))
+		return -EINTR;
 	error = __prepare_munmap(&ctx);
-	if (!ctx.vmas)
+	if (!ctx.vmas) {
+		if (!locked)
+			mmap_write_unlock(mm);
 		return error;
+	}
 
 	/*
 	 * unlock any mlock()ed ranges
@@ -3074,7 +3080,14 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	mm->map_count -= nr_vmas;
 	validate_mm(mm);
 
-	return ctx.downgrade ? 1 : 0;
+	if (locked) {
+		return ctx.downgrade ? 1 : 0;
+	} else if (ctx.downgrade) {
+		mmap_read_unlock(mm);
+	} else {
+		mmap_write_unlock(mm);
+	}
+	return 0;
 }
 
 int do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
@@ -3089,20 +3102,7 @@ static int __vm_munmap(unsigned long start, size_t len, bool downgrade)
 	struct mm_struct *mm = current->mm;
 	LIST_HEAD(uf);
 
-	if (mmap_write_lock_killable(mm))
-		return -EINTR;
-
-	ret = __do_munmap(mm, start, len, true, &uf, downgrade);
-	/*
-	 * Returning 1 indicates mmap_lock is downgraded.
-	 * But 1 is not legal return value of vm_munmap() and munmap(), reset
-	 * it to 0 before return.
-	 */
-	if (ret == 1) {
-		mmap_read_unlock(mm);
-		ret = 0;
-	} else
-		mmap_write_unlock(mm);
+	ret = __do_munmap(mm, start, len, false, &uf, downgrade);
 
 	userfaultfd_unmap_complete(mm, &uf);
 	return ret;
