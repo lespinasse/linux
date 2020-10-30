@@ -1083,6 +1083,7 @@ unsigned long do_mmap(struct file *file,
 			unsigned long *populate,
 			struct list_head *uf)
 {
+	struct mm_struct *mm = current->mm
 	struct vm_area_struct *vma;
 	struct vm_region *region;
 	struct rb_node *rb;
@@ -1092,12 +1093,18 @@ unsigned long do_mmap(struct file *file,
 
 	*populate = 0;
 
+	if (!locked && mmap_write_lock_killable(mm))
+		return -EINTR;
+
 	/* decide whether we should attempt the mapping, and if so what sort of
 	 * mapping */
 	ret = validate_mmap_request(file, addr, len, prot, flags, pgoff,
 				    &capabilities);
-	if (ret < 0)
+	if (ret < 0) {
+		if (!locked)
+			mmap_write_unlock(mm);
 		return ret;
+	}
 
 	/* we ignore the address hint */
 	addr = 0;
@@ -1112,7 +1119,7 @@ unsigned long do_mmap(struct file *file,
 	if (!region)
 		goto error_getting_region;
 
-	vma = vm_area_alloc(current->mm);
+	vma = vm_area_alloc(mm);
 	if (!vma)
 		goto error_getting_vma;
 
@@ -1253,10 +1260,10 @@ unsigned long do_mmap(struct file *file,
 	/* okay... we have a mapping; now we have to register it */
 	result = vma->vm_start;
 
-	current->mm->stat_vm.total += len >> PAGE_SHIFT;
+	mm->stat_vm.total += len >> PAGE_SHIFT;
 
 share:
-	add_vma_to_mm(current->mm, vma);
+	add_vma_to_mm(mm, vma);
 
 	/* we flush the region from the icache only when the first executable
 	 * mapping of it is made  */
@@ -1266,6 +1273,8 @@ share:
 	}
 
 	up_write(&nommu_region_sem);
+	if (!locked)
+		mmap_write_unlock(mm);
 
 	return result;
 
@@ -1278,6 +1287,8 @@ error:
 	if (vma->vm_file)
 		fput(vma->vm_file);
 	vm_area_free(vma);
+	if (!locked)
+		mmap_write_unlock(mm);
 	return ret;
 
 sharing_violation:
@@ -1291,12 +1302,16 @@ error_getting_vma:
 	pr_warn("Allocation of vma for %lu byte allocation from process %d failed\n",
 			len, current->pid);
 	show_free_areas(0, NULL);
+	if (!locked)
+		mmap_write_unlock(mm);
 	return -ENOMEM;
 
 error_getting_region:
 	pr_warn("Allocation of vm region for %lu byte allocation from process %d failed\n",
 			len, current->pid);
 	show_free_areas(0, NULL);
+	if (!locked)
+		mmap_write_unlock(mm);
 	return -ENOMEM;
 }
 

@@ -1561,22 +1561,29 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			vm_flags |= VM_NORESERVE;
 	}
 
+	if (!locked && mmap_write_lock_killable(mm))
+		return -EINTR;
+
 	/* Too many mappings? */
-	if (mm->map_count > sysctl_max_map_count)
-		return -ENOMEM;
+	if (mm->map_count > sysctl_max_map_count) {
+		addr = -ENOMEM;
+		goto unlock;
+	}
 
 	/* Obtain the address to map to. we verify (or select) it and ensure
 	 * that it represents a valid section of the address space.
 	 */
 	addr = get_unmapped_area(file, addr, len, pgoff, flags);
 	if (IS_ERR_VALUE(addr))
-		return addr;
+		goto unlock;
 
 	if (flags & MAP_FIXED_NOREPLACE) {
 		struct vm_area_struct *vma = find_vma(mm, addr);
 
-		if (vma && vma->vm_start < addr + len)
-			return -EEXIST;
+		if (vma && vma->vm_start < addr + len) {
+			addr = -EEXIST;
+			goto unlock;
+		}
 	}
 
 	if (!file && !(vm_flags & VM_SHARED)) {
@@ -1591,6 +1598,9 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	    ((vm_flags & VM_LOCKED) ||
 	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
 		*populate = len;
+unlock:
+	if (!locked)
+		mmap_write_unlock(mm);
 	return addr;
 }
 

@@ -501,11 +501,8 @@ unsigned long vm_mmap_pgoff(struct file *file, unsigned long addr,
 
 	ret = security_mmap_file(file, prot, flag);
 	if (!ret) {
-		if (mmap_write_lock_killable(mm))
-			return -EINTR;
 		ret = do_mmap(file, addr, len, prot, flag, pgoff,
-				true, &populate, &uf);
-		mmap_write_unlock(mm);
+				false, &populate, &uf);
 		userfaultfd_unmap_complete(mm, &uf);
 		if (populate)
 			mm_populate(ret, populate);
