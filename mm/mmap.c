@@ -1357,6 +1357,8 @@ static inline int mlock_future_check(struct mm_struct *mm,
 	if (flags & VM_LOCKED) {
 		locked = len >> PAGE_SHIFT;
 		locked += mm->locked_vm;
+		// XXX rlimit definition depends on current task
+		// see include/linux/sched/signal.h
 		lock_limit = rlimit(RLIMIT_MEMLOCK);
 		lock_limit >>= PAGE_SHIFT;
 		if (locked > lock_limit && !capable(CAP_IPC_LOCK))
@@ -1441,6 +1443,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		return -EOVERFLOW;
 
 	if (prot == PROT_EXEC) {
+		// XXX must hold lock here
 		pkey = execute_only_pkey(mm);
 		if (pkey < 0)
 			pkey = 0;
@@ -1450,14 +1453,15 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	 * to. we assume access permissions have been handled by the open
 	 * of the memory object, so we don't do any here.
 	 */
+	// XXX need to hold lock for mm->def_flags (set by mlockall, ...)
 	vm_flags = calc_vm_prot_bits(prot, pkey) | calc_vm_flag_bits(flags) |
 			mm->def_flags | VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC;
 
 	if (flags & MAP_LOCKED)
-		if (!can_do_mlock())
+		if (!can_do_mlock()) // XXX
 			return -EPERM;
 
-	if (mlock_future_check(mm, vm_flags, len))
+	if (mlock_future_check(mm, vm_flags, len)) // XXX
 		return -EAGAIN;
 
 	if (file) {

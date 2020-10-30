@@ -28,6 +28,7 @@
 
 bool can_do_mlock(void)
 {
+	// XXX rlimit definition depends on current task
 	if (rlimit(RLIMIT_MEMLOCK) != 0)
 		return true;
 	if (capable(CAP_IPC_LOCK))
