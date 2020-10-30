@@ -783,7 +783,7 @@ static bool is_vsyscall_vaddr(unsigned long vaddr)
 	return unlikely((vaddr & PAGE_MASK) == VSYSCALL_ADDR);
 }
 
-static void
+static noinline void
 __bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 		       unsigned long address, u32 pkey, int si_code)
 {
@@ -840,76 +840,6 @@ bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 		     unsigned long address)
 {
 	__bad_area_nosemaphore(regs, error_code, address, 0, SEGV_MAPERR);
-}
-
-static inline bool bad_area_access_from_pkeys(unsigned long error_code,
-		struct vm_area_struct *vma)
-{
-	/* This code is always called on the current mm */
-	bool foreign = false;
-
-	if (!boot_cpu_has(X86_FEATURE_OSPKE))
-		return false;
-	if (error_code & X86_PF_PK)
-		return true;
-	/* this checks permission keys on the VMA: */
-	if (!arch_vma_access_permitted(vma, (error_code & X86_PF_WRITE),
-				       (error_code & X86_PF_INSTR), foreign))
-		return true;
-	return false;
-}
-
-static noinline void
-bad_area(struct pt_regs *regs, unsigned long error_code,
-	 unsigned long address, struct vm_area_struct *vma,
-	 struct mmap_read_range *range)
-{
-	u32 pkey = 0;
-	int si_code = SEGV_MAPERR;
-
-	if (!vma)
-		goto unlock;
-
-	/*
-	 * This OSPKE check is not strictly necessary at runtime.
-	 * But, doing it this way allows compiler optimizations
-	 * if pkeys are compiled out.
-	 */
-	if (bad_area_access_from_pkeys(error_code, vma)) {
-		/*
-		 * A protection key fault means that the PKRU value did not allow
-		 * access to some PTE.  Userspace can figure out what PKRU was
-		 * from the XSAVE state.  This function captures the pkey from
-		 * the vma and passes it to userspace so userspace can discover
-		 * which protection key was set on the PTE.
-		 *
-		 * If we get here, we know that the hardware signaled a X86_PF_PK
-		 * fault and that there was a VMA once we got in the fault
-		 * handler.  It does *not* guarantee that the VMA we find here
-		 * was the one that we faulted on.
-		 *
-		 * 1. T1   : mprotect_key(foo, PAGE_SIZE, pkey=4);
-		 * 2. T1   : set PKRU to deny access to pkey=4, touches page
-		 * 3. T1   : faults...
-		 * 4.    T2: mprotect_key(foo, PAGE_SIZE, pkey=5);
-		 * 5. T1   : enters fault handler, takes mmap_lock, etc...
-		 * 6. T1   : reaches here, sees vma_pkey(vma)=5, when we really
-		 *	     faulted on a pte with its pkey=4.
-		 */
-		pkey = vma_pkey(vma);
-		si_code = SEGV_PKUERR;
-	} else {
-		si_code = SEGV_ACCERR;
-	}
-
-unlock:
-	/*
-	 * Something tried to access memory that isn't in our memory map..
-	 * Fix it, but check if it's kernel or user first..
-	 */
-	mmap_read_range_unlock(current->mm, range);
-
-	__bad_area_nosemaphore(regs, error_code, address, pkey, si_code);
 }
 
 static void
@@ -1085,26 +1015,6 @@ int show_unhandled_signals = 1;
 static inline int
 access_error(unsigned long error_code, struct vm_area_struct *vma)
 {
-	/* This is only called for the current mm, so: */
-	bool foreign = false;
-
-	/*
-	 * Read or write was blocked by protection keys.  This is
-	 * always an unconditional error and can never result in
-	 * a follow-up action to resolve the fault, like a COW.
-	 */
-	if (error_code & X86_PF_PK)
-		return 1;
-
-	/*
-	 * Make sure to check the VMA so that we do not perform
-	 * faults just to hit a X86_PF_PK as soon as we fill in a
-	 * page.
-	 */
-	if (!arch_vma_access_permitted(vma, (error_code & X86_PF_WRITE),
-				       (error_code & X86_PF_INSTR), foreign))
-		return 1;
-
 	if (error_code & X86_PF_WRITE) {
 		/* write, present and write, not present: */
 		if (unlikely(!(vma->vm_flags & VM_WRITE)))
@@ -1203,18 +1113,132 @@ do_kern_addr_fault(struct pt_regs *regs, unsigned long hw_error_code,
 }
 NOKPROBE_SYMBOL(do_kern_addr_fault);
 
+struct pf_lock_ctx {
+	struct mmap_lock_waiter waiter;
+
+	/* Inputs */
+	unsigned long address;
+	unsigned long hw_error_code;
+	unsigned int flags;
+
+	/* Outputs */
+	int si_code;
+	u32 pkey;
+	vm_fault_t fault;
+	struct vm_area_struct *vma;
+	struct mmap_read_range *range;
+
+	/* Allocs */
+	struct vm_area_struct pvma;
+	struct mmap_read_range fine_range;
+};
+
+static bool __pf_mmap_lock(struct mm_struct *mm, struct mmap_lock_waiter *w)
+{
+	struct pf_lock_ctx *ctx = container_of(w, struct pf_lock_ctx, waiter);
+	unsigned long address = ctx->address;
+	struct vm_area_struct *vma;
+
+	if (mm->mmap_lock.coarse_count < 0)
+		return false;
+
+	vma = find_vma(mm, address);
+	if (unlikely(!vma)) {
+	maperr:
+		ctx->si_code = SEGV_MAPERR;
+		return true;
+	}
+	if (unlikely(vma->vm_start > address)) {
+		if (unlikely(!(vma->vm_flags & VM_GROWSDOWN)))
+			goto maperr;
+		if (unlikely(expand_stack(vma, address)))
+			goto maperr;
+	}
+
+	if (vma->vm_ops == &mmap_write_lock_ops)
+		return false;
+
+	/*
+	 * Read or write was blocked by protection keys.  This is
+	 * always an unconditional error and can never result in
+	 * a follow-up action to resolve the fault, like a COW.
+	 */
+	if (unlikely(ctx->hw_error_code & X86_PF_PK)) {
+		/*
+		 * A protection key fault means that the PKRU value did not
+		 * allow access to some PTE. Userspace can figure out what PKRU
+		 * was from the XSAVE state. This function captures the pkey
+		 * from the vma and passes it to userspace so userspace can
+		 * discover which protection key was set on the PTE.
+		 *
+		 * We know that the hardware signaled a X86_PF_PK fault and
+		 * that there was a VMA once we got in the fault handler.
+		 * It does *not* guarantee that the VMA we find here
+		 * was the one that we faulted on.
+		 *
+		 * 1. T1   : mprotect_key(foo, PAGE_SIZE, pkey=4);
+		 * 2. T1   : set PKRU to deny access to pkey=4, touches page
+		 * 3. T1   : faults...
+		 * 4.    T2: mprotect_key(foo, PAGE_SIZE, pkey=5);
+		 * 5. T1   : enters fault handler, takes mmap_lock, etc...
+		 * 6. T1   : reaches here, sees vma_pkey(vma)=5, when we really
+		 *	     faulted on a pte with its pkey=4.
+		 */
+		ctx->si_code = SEGV_PKUERR;
+		ctx->pkey = vma_pkey(vma);
+	}
+
+
+	if (unlikely(access_error(ctx->hw_error_code, vma))) {
+		ctx->si_code = SEGV_ACCERR;
+		return true;
+	}
+
+	if (!vma_is_anonymous(vma)) {
+		/*
+		 * We need a coarse read lock to process faults in this vma.
+		 */
+		if (mm->mmap_lock.fine_writers)
+			return false;
+		ctx->fault = 0;
+		ctx->vma = vma;
+		ctx->range = NULL;
+		mm->mmap_lock.coarse_count++;
+		return true;
+	}
+
+	/*
+	 * Allocate anon_vma if needed.
+	 * This needs to operate on the vma of record.
+	 */
+	ctx->fault = prepare_mm_fault(vma, ctx->flags);
+
+	/* Copy vma attributes into pseudo-vma */
+	ctx->vma = &ctx->pvma;
+	ctx->pvma = *vma;
+
+	/* Acquire fine grained lock on the intersection of vma and pmd */
+	ctx->range = &ctx->fine_range;
+	ctx->fine_range.start = address & PMD_MASK;
+	ctx->fine_range.end = ctx->fine_range.start + PMD_SIZE;
+	if (vma->vm_start > ctx->fine_range.start)
+		ctx->fine_range.start = vma->vm_start;
+	if (vma->vm_end < ctx->fine_range.end)
+		ctx->fine_range.end = vma->vm_end;
+	mmap_insert_read_range(mm, &ctx->fine_range);
+	return true;
+}
+
 /* Handle faults in the user portion of the address space */
 static inline
 void do_user_addr_fault(struct pt_regs *regs,
 			unsigned long hw_error_code,
 			unsigned long address)
 {
-	struct mmap_read_range *range;
-	struct vm_area_struct pvma, *vma;
 	struct task_struct *tsk;
 	struct mm_struct *mm;
-	vm_fault_t fault;
 	unsigned int flags = FAULT_FLAG_DEFAULT;
+	struct pf_lock_ctx ctx;
 
 	tsk = current;
 	mm = tsk->mm;
@@ -1294,8 +1318,6 @@ void do_user_addr_fault(struct pt_regs *regs,
 	}
 #endif
 
-	range = NULL;
-
 	/*
 	 * Kernel-mode access to the user address space should only occur
 	 * on well-defined single instructions listed in the exception
@@ -1308,7 +1330,14 @@ void do_user_addr_fault(struct pt_regs *regs,
 	 * 1. Failed to acquire mmap_lock, and
 	 * 2. The access did not originate in userspace.
 	 */
-	if (unlikely(!mmap_read_trylock(mm))) {
+
+	ctx.address = address;
+	ctx.hw_error_code = hw_error_code;
+	ctx.flags = flags;
+	ctx.si_code = 0;
+
+	might_sleep();
+	if (!mmap_read_f_trylock(mm, &ctx.waiter, __pf_mmap_lock)) {
 		if (!user_mode(regs) && !search_exception_tables(regs->ip)) {
 			/*
 			 * Fault from code in kernel from
@@ -1318,57 +1347,29 @@ void do_user_addr_fault(struct pt_regs *regs,
 			return;
 		}
 retry:
-		mmap_read_lock(mm);
-	} else {
-		/*
-		 * The above down_read_trylock() might have succeeded in
-		 * which case we'll have missed the might_sleep() from
-		 * down_read():
-		 */
-		might_sleep();
+		ctx.flags = flags;
+		ctx.si_code = 0;
+		mmap_read_f_lock(mm, &ctx.waiter, __pf_mmap_lock);
 	}
 
-	vma = find_vma(mm, address);
-	if (unlikely(!vma)) {
-		bad_area(regs, hw_error_code, address, NULL, range);
-		return;
-	}
-	if (likely(vma->vm_start <= address))
-		goto good_area;
-	if (unlikely(!(vma->vm_flags & VM_GROWSDOWN))) {
-		bad_area(regs, hw_error_code, address, NULL, range);
-		return;
-	}
-	if (unlikely(expand_stack(vma, address))) {
-		bad_area(regs, hw_error_code, address, NULL, range);
+	if (ctx.si_code) {
+		lock_release(&mm->mmap_lock.dep_map, _RET_IP_);
+		__bad_area_nosemaphore(regs, hw_error_code, address,
+				ctx.pkey, ctx.si_code);
 		return;
 	}
 
 	/*
-	 * Ok, we have a good vm_area for this memory access, so
-	 * we can handle it..
+	 * Make sure to check the VMA so that we do not perform
+	 * faults just to hit a X86_PF_PK as soon as we fill in a
+	 * page.
 	 */
-good_area:
-	if (unlikely(access_error(hw_error_code, vma))) {
-		bad_area(regs, hw_error_code, address, vma, range);
-		return;
-	}
-
-	if (vma_is_anonymous(vma)) {
-		/*
-		 * Allocate anon_vma if needed.
-		 * This needs to operate on the vma of record.
-		 */
-		fault = prepare_mm_fault(vma, flags);
-		if (fault)
-			goto got_fault;
-
-		/*
-		 * Copy vma attributes into a pseudo-vma.
-		 * This will be required when using fine grained locks.
-		 */
-		pvma = *vma;
-		vma = &pvma;
+	if (!arch_vma_access_permitted(ctx.vma, (hw_error_code & X86_PF_WRITE),
+			(hw_error_code & X86_PF_INSTR), false)) {
+		mmap_read_range_unlock(mm, ctx.range);
+		__bad_area_nosemaphore(regs, hw_error_code, address,
+				vma_pkey(ctx.vma), SEGV_PKUERR);
+                return;
 	}
 
 	/*
@@ -1384,11 +1385,13 @@ good_area:
 	 * userland). The return to userland is identified whenever
 	 * FAULT_FLAG_USER|FAULT_FLAG_KILLABLE are both set in flags.
 	 */
-	fault = handle_mm_fault_range(vma, address, flags, regs, range);
-got_fault:
+	if (!ctx.fault) {
+		ctx.fault = handle_mm_fault_range(ctx.vma, address, flags,
+						  regs, ctx.range);
+	}
 
 	/* Quick path to respond to signals */
-	if (fault_signal_pending(fault, regs)) {
+	if (fault_signal_pending(ctx.fault, regs)) {
 		if (!user_mode(regs))
 			no_context(regs, hw_error_code, address, SIGBUS,
 				   BUS_ADRERR);
@@ -1400,15 +1403,15 @@ got_fault:
 	 * and if there is a fatal signal pending there is no guarantee
 	 * that we made any progress. Handle this case first.
 	 */
-	if (unlikely((fault & VM_FAULT_RETRY) &&
+	if (unlikely((ctx.fault & VM_FAULT_RETRY) &&
 		     (flags & FAULT_FLAG_ALLOW_RETRY))) {
 		flags |= FAULT_FLAG_TRIED;
 		goto retry;
 	}
 
-	mmap_read_range_unlock(mm, range);
-	if (unlikely(fault & VM_FAULT_ERROR)) {
-		mm_fault_error(regs, hw_error_code, address, fault);
+	mmap_read_range_unlock(mm, ctx.range);
+	if (unlikely(ctx.fault & VM_FAULT_ERROR)) {
+		mm_fault_error(regs, hw_error_code, address, ctx.fault);
 		return;
 	}
 
