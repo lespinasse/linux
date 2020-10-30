@@ -443,6 +443,16 @@ RB_DECLARE_CALLBACKS_MAX(static, vma_gap_callbacks,
 static void vma_gap_update(struct vm_area_struct *vma)
 {
 	/*
+	 * The mmap_lock must be held for write,
+	 * OR it must be held for read and page_table_lock must be held
+	 * (as in the expand_upwards or expand_downward cases)
+	 */
+	WARN_ON(debug_locks &&
+		!lockdep_is_held_type(&vma->vm_mm->mmap_lock, 0) &&
+		(!lockdep_is_held_type(&vma->vm_mm->mmap_lock, 1) ||
+		 !lockdep_is_held_type(&vma->vm_mm->page_table_lock, 0)));
+
+	/*
 	 * As it turns out, RB_DECLARE_CALLBACKS_MAX() already created
 	 * a callback function that does exactly what we want.
 	 */
@@ -452,6 +462,8 @@ static void vma_gap_update(struct vm_area_struct *vma)
 static inline void vma_rb_insert(struct vm_area_struct *vma,
 				 struct rb_root *root)
 {
+	mmap_assert_write_locked(vma->vm_mm);
+
 	/* All rb_subtree_gap values must be consistent prior to insertion */
 	validate_mm_rb(root, NULL);
 
@@ -460,6 +472,8 @@ static inline void vma_rb_insert(struct vm_area_struct *vma,
 
 static void __vma_rb_erase(struct vm_area_struct *vma, struct rb_root *root)
 {
+	mmap_assert_write_locked(vma->vm_mm);
+
 	/*
 	 * Note rb_erase_augmented is a fairly large inline function,
 	 * so make sure we instantiate it only once with our desired
