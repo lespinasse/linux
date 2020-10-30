@@ -2778,19 +2778,30 @@ int split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 	return __split_vma(mm, vma, addr, new_below);
 }
 
+/*
+ * Having a close hook prevents vma merging regardless of flags.
+ */
+static void mmap_write_lock_close(struct vm_area_struct *vma)
+{
+}
+
+static const struct vm_operations_struct mmap_write_lock_ops = {
+       .close = mmap_write_lock_close,
+};
+
 struct prepare_munmap_ctx {
-	struct mm_struct *mm;
-	unsigned long start, end;
+	struct vm_area_struct lock;
 	struct list_head *uf;
 	bool downgrade;
-	struct vm_area_struct *vmas, *prev;
+	struct vm_area_struct *vmas;
 };
 
 static int __prepare_munmap(struct prepare_munmap_ctx *ctx)
 {
 	struct vm_area_struct *vma, *prev, *last;
-	struct mm_struct *mm = ctx->mm;
-	unsigned long start = ctx->start, end = ctx->end;
+	struct mm_struct *mm = ctx->lock.vm_mm;
+	unsigned long start = ctx->lock.vm_start, end = ctx->lock.vm_end;
+	struct rb_node **rb_link, *rb_parent;
 
 	/* Find the first overlapping VMA */
 	vma = find_vma(mm, start);
@@ -2856,9 +2867,28 @@ static int __prepare_munmap(struct prepare_munmap_ctx *ctx)
 	/* Detach vmas from rbtree */
 	if (!detach_vmas_to_be_unmapped(mm, vma, prev, end))
 		ctx->downgrade = false;
-
 	ctx->vmas = vma;
-	ctx->prev = prev;
+
+	/* Insert lock vma */
+	if (!mm->mmap) {
+		VM_BUG_ON(prev);
+		rb_parent = NULL;
+		rb_link = &mm->mm_rb.rb_node;
+	} else if (!prev) {
+		VM_BUG_ON(mm->mmap->vm_rb.rb_left);
+		rb_parent = &mm->mmap->vm_rb;
+		rb_link = &rb_parent->rb_left;
+	} else if (!prev->vm_rb.rb_right) {
+		rb_parent = &prev->vm_rb;
+		rb_link = &rb_parent->rb_right;
+	} else {
+		VM_BUG_ON(!prev->vm_next || prev->vm_next->vm_rb.rb_left);
+		rb_parent = &prev->vm_next->vm_rb;
+		rb_link = &rb_parent->rb_left;
+	}
+	__vma_link(mm, &ctx->lock, prev, rb_link, rb_parent);
+	ctx->downgrade = false;	/* Need write lock to remove lock vma */
+
 	return 0;
 }
 
@@ -2875,7 +2905,6 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	unsigned long nr_accounted = 0, nr_unlocked = 0;
 	int nr_vmas;
 	unsigned long end;
-	struct vm_area_struct *next;
 	int error;
 
 	if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
@@ -2886,9 +2915,13 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (len == 0)
 		return -EINVAL;
 
-	ctx.mm = mm;
-	ctx.start = start;
-	ctx.end = end;
+	vma_init(&ctx.lock, mm);
+	ctx.lock.vm_start = start;
+	ctx.lock.vm_end = end;
+	ctx.lock.vm_flags = VM_NONE;
+	ctx.lock.vm_page_prot = vm_get_page_prot(ctx.lock.vm_flags);
+	ctx.lock.vm_pgoff = 0;
+	ctx.lock.vm_ops = &lock_vma_ops;
 	ctx.uf = uf;
 	ctx.downgrade = downgrade;
 	ctx.vmas = NULL;
@@ -2913,13 +2946,30 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (ctx.downgrade)
 		mmap_write_downgrade(mm);
 
-	next = ctx.prev ? ctx.prev->vm_next : mm->mmap;
 	unmap_region(mm, ctx.vmas, start, end,
-		     ctx.prev ? ctx.prev->vm_end : FIRST_USER_ADDRESS,
-		     next ? next->vm_start : USER_PGTABLES_CEILING);
+		     ctx.lock.vm_prev ?
+			ctx.lock.vm_prev->vm_end : FIRST_USER_ADDRESS,
+		     ctx.lock.vm_next ?
+			ctx.lock.vm_next->vm_start : USER_PGTABLES_CEILING);
 
 	/* Fix up all other VM information */
 	nr_vmas = remove_vma_list(ctx.vmas, &vm_stat_updates, &nr_accounted);
+
+	/* Remove the lock vma */
+	vma_rb_erase(&ctx.lock, &mm->mm_rb);
+	if (ctx.lock.vm_prev) {
+		ctx.lock.vm_prev->vm_next = ctx.lock.vm_next;
+	} else {
+		mm->mmap = ctx.lock.vm_next;
+	}
+	if (ctx.lock.vm_next) {
+		ctx.lock.vm_next->vm_prev = ctx.lock.vm_prev;
+		vma_gap_update(ctx.lock.vm_next);
+	} else {
+		mm->highest_vm_end = ctx.lock.vm_prev ?
+			vm_end_gap(ctx.lock.vm_prev) : 0;
+	}
+	vmacache_invalidate(mm);
 
 	/* Update high watermark before we lower total_vm */
 	update_hiwater_vm(mm);
