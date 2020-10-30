@@ -202,11 +202,15 @@ static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
 	int ret;
 	unsigned int gup_flags = FOLL_FORCE;
 
+	mmap_write_lock(bprm->mm);
+
 #ifdef CONFIG_STACK_GROWSUP
 	if (write) {
 		ret = expand_downwards(bprm->vma, pos);
-		if (ret < 0)
+		if (ret < 0) {
+			mmap_write_unlock(bprm->mm);
 			return NULL;
+		}
 	}
 #endif
 
@@ -219,6 +223,7 @@ static struct page *get_arg_page(struct linux_binprm *bprm, unsigned long pos,
 	 */
 	ret = get_user_pages_remote(bprm->mm, pos, 1, gup_flags,
 			&page, NULL, NULL);
+	mmap_write_unlock(bprm->mm);
 	if (ret <= 0)
 		return NULL;
 
