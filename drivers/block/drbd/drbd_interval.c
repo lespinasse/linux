@@ -16,7 +16,7 @@ sector_t interval_end(struct rb_node *node)
 #define NODE_END(node) ((node)->sector + ((node)->size >> 9))
 
 RB_DECLARE_CALLBACKS_MAX(static, augment_callbacks,
-			 struct drbd_interval, rb, sector_t, end, NODE_END);
+			 struct drbd_interval, rb, sector_t, end, NODE_END)
 
 /**
  * drbd_insert_interval  -  insert a new interval into a tree
