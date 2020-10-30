@@ -2834,21 +2834,18 @@ out:
 	return true;
 }
 
-static inline bool grow_lock_vma(struct vm_area_struct *lock)
+static int __grow_lock_vma(struct vm_area_struct *lock,
+		unsigned long floor, unsigned long ceiling)
 {
-	unsigned long floor, ceiling, pg_start, pg_last, addr;
-	bool adjusted = false;
+	unsigned long pg_start, pg_last, addr;
+	int adjusted = 0;
 
-	floor = lock->vm_prev ? lock->vm_prev->vm_end : FIRST_USER_ADDRESS;
-	ceiling = lock->vm_next ?
-		lock->vm_next->vm_start : USER_PGTABLES_CEILING;
 	if (pgtable_boundaries(lock->vm_start, floor, ceiling,
 			       &pg_start, &pg_last)) {
 		addr = max(pg_start, FIRST_USER_ADDRESS);
 		if (addr < lock->vm_start) {
 			lock->vm_start = addr;
-			vma_gap_update(lock);
-			adjusted = true;
+			adjusted = 1;
 		}
 		if (pg_last >= lock->vm_end - 1)
 			goto adjust_end;
@@ -2859,14 +2856,30 @@ static inline bool grow_lock_vma(struct vm_area_struct *lock)
 		addr = min(pg_last, TASK_SIZE-1) + 1;
 		if (addr > lock->vm_end) {
 			lock->vm_end = addr;
-			if (lock->vm_next)
-				vma_gap_update(lock->vm_next);
-			else
-				lock->vm_mm->highest_vm_end = addr;
-			adjusted = true;
+			adjusted |= 2;
 		}
 	}
 	return adjusted;
+}
+
+static inline bool grow_lock_vma(struct vm_area_struct *lock)
+{
+	unsigned long floor, ceiling;
+	int adjusted;
+
+	floor = lock->vm_prev ? lock->vm_prev->vm_end : FIRST_USER_ADDRESS;
+	ceiling = lock->vm_next ?
+		lock->vm_next->vm_start : USER_PGTABLES_CEILING;
+	adjusted = __grow_lock_vma(lock, floor, ceiling);
+	if (adjusted & 1)
+		vma_gap_update(lock);
+	if (adjusted & 2) {
+		if (lock->vm_next)
+			vma_gap_update(lock->vm_next);
+		else
+			lock->vm_mm->highest_vm_end = lock->vm_end;
+	}
+	return adjusted != 0;
 }
 
 static inline void free_boundary_pgtables(struct mm_struct *mm,
@@ -2906,7 +2919,7 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 {
 	struct prepare_munmap_ctx *ctx =
 		container_of(w, struct prepare_munmap_ctx, waiter);
-	struct vm_area_struct *vma, *prev, *last;
+	struct vm_area_struct *vma, *prev, *last, *next;
 	unsigned long start = ctx->lock.vm_start, end = ctx->lock.vm_end;
 	struct rb_node **rb_link, *rb_parent;
 	bool fine_grained = false;
@@ -3016,9 +3029,8 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 		ctx->downgrade = false;
 	ctx->vmas = vma;
 
+	next = prev ? prev->vm_next : mm->mmap;
 	if (!fine_grained) {
-		struct vm_area_struct *next = prev ? prev->vm_next : mm->mmap;
-
 		/* Take note of any free address space around unmap region */
 		ctx->lock.vm_start = prev ? prev->vm_end : FIRST_USER_ADDRESS;
 		ctx->lock.vm_end = next ?
@@ -3027,6 +3039,13 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 			mm->mmap_lock.coarse_count = -1;
 		return true;
 	}
+
+	/*
+	 * Expand lock vma to cover any existing adjacent free space that
+	 * we may need to unmap page tables for.
+	 */
+	__grow_lock_vma(&ctx->lock, prev ? prev->vm_end : FIRST_USER_ADDRESS,
+			next ? next->vm_start : USER_PGTABLES_CEILING);
 
 	/* Insert lock vma to record the fine grained lock*/
 	if (!mm->mmap) {
