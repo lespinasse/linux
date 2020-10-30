@@ -1210,7 +1210,7 @@ void do_user_addr_fault(struct pt_regs *regs,
 			unsigned long address)
 {
 	struct mmap_read_range *range;
-	struct vm_area_struct *vma;
+	struct vm_area_struct pvma, *vma;
 	struct task_struct *tsk;
 	struct mm_struct *mm;
 	vm_fault_t fault;
@@ -1354,6 +1354,23 @@ good_area:
 		return;
 	}
 
+	if (vma_is_anonymous(vma)) {
+		/*
+		 * Allocate anon_vma if needed.
+		 * This needs to operate on the vma of record.
+		 */
+		fault = prepare_mm_fault(vma, flags);
+		if (fault)
+			goto got_fault;
+
+		/*
+		 * Copy vma attributes into a pseudo-vma.
+		 * This will be required when using fine grained locks.
+		 */
+		pvma = *vma;
+		vma = &pvma;
+	}
+
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
@@ -1368,6 +1385,7 @@ good_area:
 	 * FAULT_FLAG_USER|FAULT_FLAG_KILLABLE are both set in flags.
 	 */
 	fault = handle_mm_fault_range(vma, address, flags, regs, range);
+got_fault:
 
 	/* Quick path to respond to signals */
 	if (fault_signal_pending(fault, regs)) {
