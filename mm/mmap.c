@@ -2626,9 +2626,10 @@ EXPORT_SYMBOL_GPL(find_extend_vma);
  *
  * Called with the mm semaphore held.
  */
-static void remove_vma_list(struct vm_area_struct *vma,
+static int remove_vma_list(struct vm_area_struct *vma,
 		struct mm_vm_stat *stat, unsigned long *nr_accounted)
 {
+	int nr_vmas = 0;
 	do {
 		long nrpages = vma_pages(vma);
 
@@ -2636,7 +2637,9 @@ static void remove_vma_list(struct vm_area_struct *vma,
 			*nr_accounted += nrpages;
 		do_vm_stat_account(stat, vma->vm_flags, nrpages);
 		vma = remove_vma(vma);
+		nr_vmas++;
 	} while (vma);
+	return nr_vmas;
 }
 
 /*
@@ -2675,7 +2678,6 @@ detach_vmas_to_be_unmapped(struct mm_struct *mm, struct vm_area_struct *vma,
 	vma->vm_prev = NULL;
 	do {
 		vma_rb_erase(vma, &mm->mm_rb);
-		mm->map_count--;
 		tail_vma = vma;
 		vma = vma->vm_next;
 	} while (vma && vma->vm_start < end);
@@ -2789,6 +2791,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 {
 	struct mm_vm_stat vm_stat_updates = {};
 	unsigned long nr_accounted = 0;
+	int nr_vmas;
 	unsigned long end;
 	struct vm_area_struct *vma, *prev, *last;
 
@@ -2891,7 +2894,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	unmap_region(mm, vma, prev, start, end);
 
 	/* Fix up all other VM information */
-	remove_vma_list(vma, &vm_stat_updates, &nr_accounted);
+	nr_vmas = remove_vma_list(vma, &vm_stat_updates, &nr_accounted);
 
 	/* Update high watermark before we lower total_vm */
 	update_hiwater_vm(mm);
@@ -2900,6 +2903,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	mm->stat_vm.stack -= vm_stat_updates.stack;
 	mm->stat_vm.data -= vm_stat_updates.data;
 	vm_unacct_memory(nr_accounted);
+	mm->map_count -= nr_vmas;
 	validate_mm(mm);
 
 	return downgrade ? 1 : 0;
