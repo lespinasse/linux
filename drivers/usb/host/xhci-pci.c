@@ -587,7 +587,7 @@ static const struct pci_device_id pci_ids[] = {
 	{ /* end: all zeroes */ }
 };
 MODULE_DEVICE_TABLE(pci, pci_ids);
-MODULE_FIRMWARE("renesas_usb_fw.mem");
+/* MODULE_FIRMWARE("renesas_usb_fw.mem"); */
 
 /* pci driver glue; this is a "new style" PCI driver module */
 static struct pci_driver xhci_pci_driver = {
