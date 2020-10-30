@@ -41,6 +41,8 @@ EXPORT_SYMBOL(mmap_lock_dequeue);
 void mmap_f_lock_slow(struct mm_struct *mm,
 		      struct mmap_lock_waiter *w, mmap_lock_f f)
 {
+	u64 before = ktime_get_ns();
+
 	w->f = f;
 	list_add_tail(&w->list, &mm->mmap_lock.head);
 	w->task = current;
@@ -55,6 +57,7 @@ void mmap_f_lock_slow(struct mm_struct *mm,
 		schedule();
 	}
 	__set_current_state(TASK_RUNNING);
+	count_vm_events(MMAP_LOCK_BLOCKED_NS, ktime_get_ns() - before);
 	lock_acquired(&mm->mmap_lock.dep_map, _RET_IP_);
 }
 EXPORT_SYMBOL(mmap_f_lock_slow);
@@ -62,6 +65,8 @@ EXPORT_SYMBOL(mmap_f_lock_slow);
 int mmap_f_lock_killable_slow(struct mm_struct *mm, struct mmap_lock_waiter *w,
 			      mmap_lock_f f)
 {
+	u64 before = ktime_get_ns();
+
 	w->f = f;
 	list_add_tail(&w->list, &mm->mmap_lock.head);
 	w->task = current;
@@ -77,6 +82,8 @@ int mmap_f_lock_killable_slow(struct mm_struct *mm, struct mmap_lock_waiter *w,
 			DEFINE_WAKE_Q(wake_q);
 
 			__set_current_state(TASK_RUNNING);
+			count_vm_events(MMAP_LOCK_BLOCKED_NS,
+					ktime_get_ns() - before);
 
 			mmap_vma_lock(mm);
 			if (!w->task) {
@@ -96,6 +103,7 @@ int mmap_f_lock_killable_slow(struct mm_struct *mm, struct mmap_lock_waiter *w,
 		schedule();
 	}
 	__set_current_state(TASK_RUNNING);
+	count_vm_events(MMAP_LOCK_BLOCKED_NS, ktime_get_ns() - before);
 acquired:
 	lock_acquired(&mm->mmap_lock.dep_map, _RET_IP_);
 	return 0;

@@ -121,6 +121,9 @@ enum vm_event_item { PGPGIN, PGPGOUT, PSWPIN, PSWPOUT,
 		SWAP_RA,
 		SWAP_RA_HIT,
 #endif
+#ifdef CONFIG_MMAP_LOCK_QUEUED
+		MMAP_LOCK_BLOCKED_NS,
+#endif
 		NR_VM_EVENT_ITEMS
 };
 
