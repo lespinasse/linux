@@ -1079,6 +1079,7 @@ unsigned long do_mmap(struct file *file,
 			unsigned long prot,
 			unsigned long flags,
 			unsigned long pgoff,
+			bool locked,
 			unsigned long *populate,
 			struct list_head *uf)
 {

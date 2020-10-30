@@ -1404,7 +1404,7 @@ static inline bool file_mmap_ok(struct file *file, struct inode *inode,
  */
 unsigned long do_mmap(struct file *file, unsigned long addr,
 			unsigned long len, unsigned long prot,
-			unsigned long flags, unsigned long pgoff,
+			unsigned long flags, unsigned long pgoff, bool locked,
 			unsigned long *populate, struct list_head *uf)
 {
 	struct mm_struct *mm = current->mm;
@@ -3334,7 +3334,7 @@ SYSCALL_DEFINE5(remap_file_pages, unsigned long, start, unsigned long, size,
 
 	file = get_file(vma->vm_file);
 	ret = do_mmap(vma->vm_file, start, size,
-			prot, flags, pgoff, &populate, NULL);
+			prot, flags, pgoff, true, &populate, NULL);
 	fput(file);
 out:
 	mmap_write_unlock(mm);
