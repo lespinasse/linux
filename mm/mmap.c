@@ -2893,29 +2893,38 @@ static const struct vm_operations_struct mmap_write_lock_ops = {
 };
 
 struct prepare_munmap_ctx {
+	struct mmap_lock_waiter waiter;
 	struct vm_area_struct lock;
+	bool locked;
 	struct list_head *uf;
 	bool downgrade;
 	struct vm_area_struct *vmas;
+	int error;
 };
 
-static int __prepare_munmap(struct prepare_munmap_ctx *ctx)
+static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 {
+	struct prepare_munmap_ctx *ctx =
+		container_of(w, struct prepare_munmap_ctx, waiter);
 	struct vm_area_struct *vma, *prev, *last;
-	struct mm_struct *mm = ctx->lock.vm_mm;
 	unsigned long start = ctx->lock.vm_start, end = ctx->lock.vm_end;
 	struct rb_node **rb_link, *rb_parent;
+
+	if (ctx->locked)
+		VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
+        else if (mm->mmap_lock.coarse_count)
+                return false;
 
 	/* Find the first overlapping VMA */
 	vma = find_vma(mm, start);
 	if (!vma)
-		return 0;
+		return true;
 	prev = vma->vm_prev;
 	/* we have  start < vma->vm_end  */
 
 	/* if it doesn't overlap, we have nothing.. */
 	if (vma->vm_start >= end)
-		return 0;
+		return true;
 
 	/*
 	 * If we need to split any vma, do it now to save pain later.
@@ -2925,28 +2934,29 @@ static int __prepare_munmap(struct prepare_munmap_ctx *ctx)
 	 * places tmp vma above, and higher split_vma places tmp vma below.
 	 */
 	if (start > vma->vm_start) {
-		int error;
-
 		/*
 		 * Make sure that map_count on return from munmap() will
 		 * not exceed its limit; but let map_count go just above
 		 * its limit temporarily, to help free resources as expected.
 		 */
-		if (end < vma->vm_end && mm->map_count >= sysctl_max_map_count)
-			return -ENOMEM;
+		if (end < vma->vm_end &&
+		    mm->map_count >= sysctl_max_map_count) {
+			ctx->error = -ENOMEM;
+			return true;
+		}
 
-		error = __split_vma(mm, vma, start, 0);
-		if (error)
-			return error;
+		ctx->error = __split_vma(mm, vma, start, 0);
+		if (ctx->error)
+			return true;
 		prev = vma;
 	}
 
 	/* Does it split the last one? */
 	last = find_vma(mm, end);
 	if (last && end > last->vm_start) {
-		int error = __split_vma(mm, last, end, 1);
-		if (error)
-			return error;
+		ctx->error = __split_vma(mm, last, end, 1);
+		if (ctx->error)
+			return true;
 	}
 	vma = prev ? prev->vm_next : mm->mmap;
 
@@ -2960,9 +2970,9 @@ static int __prepare_munmap(struct prepare_munmap_ctx *ctx)
 		 * split, despite we could. This is unlikely enough
 		 * failure that it's not worth optimizing it for.
 		 */
-		int error = userfaultfd_unmap_prep(vma, start, end, ctx->uf);
-		if (error)
-			return error;
+		ctx->error = userfaultfd_unmap_prep(vma, start, end, ctx->uf);
+		if (ctx->error)
+			return true;
 	}
 
 	arch_unmap(mm, start, end);
@@ -2992,7 +3002,9 @@ static int __prepare_munmap(struct prepare_munmap_ctx *ctx)
 	__vma_link(mm, &ctx->lock, prev, rb_link, rb_parent);
 	ctx->downgrade = false;	/* Need write lock to remove lock vma */
 
-	return 0;
+	if (!ctx->locked)
+		mm->mmap_lock.coarse_count = -1;
+	return true;
 }
 
 /* Munmap is split into 2 main parts -- this part which finds
@@ -3008,7 +3020,6 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	unsigned long nr_accounted = 0, nr_unlocked = 0;
 	int nr_vmas;
 	unsigned long end, ceiling;
-	int error;
 
 	if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
 		return -EINVAL;
@@ -3025,17 +3036,22 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	ctx.lock.vm_page_prot = vm_get_page_prot(ctx.lock.vm_flags);
 	ctx.lock.vm_pgoff = 0;
 	ctx.lock.vm_ops = &lock_vma_ops;
+	ctx.locked = locked;
 	ctx.uf = uf;
 	ctx.downgrade = downgrade;
 	ctx.vmas = NULL;
+	ctx.error = 0;
 
-	if (!locked && mmap_write_lock_killable(mm))
-		return -EINTR;
-	error = __prepare_munmap(&ctx);
-	if (!ctx.vmas) {
-		if (!locked)
-			mmap_write_unlock(mm);
-		return error;
+	if (locked) {
+		__prepare_munmap(mm, &ctx.waiter);
+		if (!ctx.vmas)
+			return ctx.error;
+	} else {
+		mmap_write_f_lock(mm, &ctx.waiter, __prepare_munmap);
+		if (!ctx.vmas) {
+			lock_release(&mm->mmap_lock.dep_map, _RET_IP_);
+			return ctx.error;
+		}
 	}
 
 	/*
