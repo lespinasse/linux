@@ -1612,6 +1612,13 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		mmap_vma_lock(mm);
 		ret = __do_mmap(mm, file, addr, len, pgoff, flags, vm_flags,
 				uf);
+		/*
+		 * There should not be any readers over the new VMA -
+		 * This was previously unmapped space, which we never
+		 * insert fine grained readers on.
+		 */
+		if (!IS_ERR_VALUE(ret))
+			VM_BUG_ON_MM(mmap_has_readers(mm, ret, ret + len), mm);
 		mm->mmap_lock.fine_writers--;
 		mmap_vma_f_unlock(mm, true);
 	}
