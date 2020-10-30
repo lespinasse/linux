@@ -76,9 +76,9 @@ int mmap_rnd_compat_bits __read_mostly = CONFIG_ARCH_MMAP_RND_COMPAT_BITS;
 static bool ignore_rlimit_data;
 core_param(ignore_rlimit_data, ignore_rlimit_data, bool, 0644);
 
-static void unmap_region(struct mm_struct *mm,
-		struct vm_area_struct *vma, struct vm_area_struct *prev,
-		unsigned long start, unsigned long end);
+static void unmap_region(struct mm_struct *mm, struct vm_area_struct *vma,
+		unsigned long start, unsigned long end,
+		unsigned long floor, unsigned long ceiling);
 
 /* description of effects of mapping type and prot in current implementation.
  * this is due to the limited x86 page protection hardware.  The expected
@@ -1710,7 +1710,7 @@ unsigned long mmap_region(struct file *file, unsigned long addr,
 		struct list_head *uf)
 {
 	struct mm_struct *mm = current->mm;
-	struct vm_area_struct *vma, *prev, *merge;
+	struct vm_area_struct *vma, *prev, *merge, *next;
 	int error;
 	struct rb_node **rb_link, *rb_parent;
 	unsigned long charged = 0;
@@ -1880,7 +1880,10 @@ unmap_and_free_vma:
 	fput(file);
 
 	/* Undo any partial mapping done by a device driver. */
-	unmap_region(mm, vma, prev, vma->vm_start, vma->vm_end);
+	next = prev ? prev->vm_next : mm->mmap;
+	unmap_region(mm, vma, vma->vm_start, vma->vm_end,
+		     prev ? prev->vm_end : FIRST_USER_ADDRESS,
+		     next ? next->vm_start : USER_PGTABLES_CEILING);
 	charged = 0;
 	if (vm_flags & VM_SHARED)
 		mapping_unmap_writable(file->f_mapping);
@@ -2643,19 +2646,17 @@ static int remove_vma_list(struct vm_area_struct *vma,
  *
  * Called with the mm semaphore held.
  */
-static void unmap_region(struct mm_struct *mm,
-		struct vm_area_struct *vma, struct vm_area_struct *prev,
-		unsigned long start, unsigned long end)
+static void unmap_region(struct mm_struct *mm, struct vm_area_struct *vma,
+		unsigned long start, unsigned long end,
+		unsigned long floor, unsigned long ceiling)
 {
-	struct vm_area_struct *next = prev ? prev->vm_next : mm->mmap;
 	struct mmu_gather tlb;
 
 	lru_add_drain();
 	tlb_gather_mmu(&tlb, mm, start, end);
 	update_hiwater_rss(mm);
 	unmap_vmas(&tlb, vma, start, end);
-	free_pgtables(&tlb, vma, prev ? prev->vm_end : FIRST_USER_ADDRESS,
-				 next ? next->vm_start : USER_PGTABLES_CEILING);
+	free_pgtables(&tlb, vma, floor, ceiling);
 	tlb_finish_mmu(&tlb, start, end);
 }
 
@@ -2866,7 +2867,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	unsigned long nr_accounted = 0, nr_unlocked = 0;
 	int nr_vmas;
 	unsigned long end;
-	struct vm_area_struct *vma = NULL, *prev;
+	struct vm_area_struct *vma = NULL, *prev, *next;
 	int error;
 
 	if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
@@ -2898,7 +2899,10 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (downgrade)
 		mmap_write_downgrade(mm);
 
-	unmap_region(mm, vma, prev, start, end);
+	next = prev ? prev->vm_next : mm->mmap;
+	unmap_region(mm, vma, start, end,
+		     prev ? prev->vm_end : FIRST_USER_ADDRESS,
+		     next ? next->vm_start : USER_PGTABLES_CEILING);
 
 	/* Fix up all other VM information */
 	nr_vmas = remove_vma_list(vma, &vm_stat_updates, &nr_accounted);
