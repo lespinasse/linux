@@ -1539,7 +1539,7 @@ int __lock_page_async(struct page *page, struct wait_page_queue *wait)
  * with the page locked and the mmap_lock unperturbed.
  */
 int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
-			 unsigned int flags)
+			 unsigned int flags, struct mmap_read_range *range)
 {
 	if (fault_flag_allow_retry_first(flags)) {
 		/*
@@ -1549,7 +1549,7 @@ int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
 		if (flags & FAULT_FLAG_RETRY_NOWAIT)
 			return 0;
 
-		mmap_read_unlock(mm);
+		mmap_read_range_unlock(mm, range);
 		if (flags & FAULT_FLAG_KILLABLE)
 			wait_on_page_locked_killable(page);
 		else
@@ -1561,7 +1561,7 @@ int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
 
 			ret = __lock_page_killable(page);
 			if (ret) {
-				mmap_read_unlock(mm);
+				mmap_read_range_unlock(mm, range);
 				return 0;
 			}
 		} else

@@ -527,7 +527,7 @@ extern void __lock_page(struct page *page);
 extern int __lock_page_killable(struct page *page);
 extern int __lock_page_async(struct page *page, struct wait_page_queue *wait);
 extern int __lock_page_or_retry(struct page *page, struct mm_struct *mm,
-				unsigned int flags);
+		unsigned int flags, struct mmap_read_range *range);
 extern void unlock_page(struct page *page);
 
 /*
@@ -586,10 +586,11 @@ static inline int lock_page_async(struct page *page,
  * __lock_page_or_retry().
  */
 static inline int lock_page_or_retry(struct page *page, struct mm_struct *mm,
-				     unsigned int flags)
+		unsigned int flags, struct mmap_read_range *range)
 {
 	might_sleep();
-	return trylock_page(page) || __lock_page_or_retry(page, mm, flags);
+	return trylock_page(page) || __lock_page_or_retry(page, mm, flags,
+							  range);
 }
 
 /*
