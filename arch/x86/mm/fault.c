@@ -842,26 +842,6 @@ bad_area_nosemaphore(struct pt_regs *regs, unsigned long error_code,
 	__bad_area_nosemaphore(regs, error_code, address, 0, SEGV_MAPERR);
 }
 
-static void
-__bad_area(struct pt_regs *regs, unsigned long error_code,
-	   unsigned long address, u32 pkey, int si_code)
-{
-	struct mm_struct *mm = current->mm;
-	/*
-	 * Something tried to access memory that isn't in our memory map..
-	 * Fix it, but check if it's kernel or user first..
-	 */
-	mmap_read_unlock(mm);
-
-	__bad_area_nosemaphore(regs, error_code, address, pkey, si_code);
-}
-
-static noinline void
-bad_area(struct pt_regs *regs, unsigned long error_code, unsigned long address)
-{
-	__bad_area(regs, error_code, address, 0, SEGV_MAPERR);
-}
-
 static inline bool bad_area_access_from_pkeys(unsigned long error_code,
 		struct vm_area_struct *vma)
 {
@@ -880,9 +860,15 @@ static inline bool bad_area_access_from_pkeys(unsigned long error_code,
 }
 
 static noinline void
-bad_area_access_error(struct pt_regs *regs, unsigned long error_code,
-		      unsigned long address, struct vm_area_struct *vma)
+bad_area(struct pt_regs *regs, unsigned long error_code,
+	 unsigned long address, struct vm_area_struct *vma)
 {
+	u32 pkey = 0;
+	int si_code = SEGV_MAPERR;
+
+	if (!vma)
+		goto unlock;
+
 	/*
 	 * This OSPKE check is not strictly necessary at runtime.
 	 * But, doing it this way allows compiler optimizations
@@ -909,12 +895,20 @@ bad_area_access_error(struct pt_regs *regs, unsigned long error_code,
 		 * 6. T1   : reaches here, sees vma_pkey(vma)=5, when we really
 		 *	     faulted on a pte with its pkey=4.
 		 */
-		u32 pkey = vma_pkey(vma);
-
-		__bad_area(regs, error_code, address, pkey, SEGV_PKUERR);
+		pkey = vma_pkey(vma);
+		si_code = SEGV_PKUERR;
 	} else {
-		__bad_area(regs, error_code, address, 0, SEGV_ACCERR);
+		si_code = SEGV_ACCERR;
 	}
+
+unlock:
+	/*
+	 * Something tried to access memory that isn't in our memory map..
+	 * Fix it, but check if it's kernel or user first..
+	 */
+	mmap_read_unlock(current->mm);
+
+	__bad_area_nosemaphore(regs, error_code, address, pkey, si_code);
 }
 
 static void
@@ -1332,17 +1326,17 @@ retry:
 
 	vma = find_vma(mm, address);
 	if (unlikely(!vma)) {
-		bad_area(regs, hw_error_code, address);
+		bad_area(regs, hw_error_code, address, NULL);
 		return;
 	}
 	if (likely(vma->vm_start <= address))
 		goto good_area;
 	if (unlikely(!(vma->vm_flags & VM_GROWSDOWN))) {
-		bad_area(regs, hw_error_code, address);
+		bad_area(regs, hw_error_code, address, NULL);
 		return;
 	}
 	if (unlikely(expand_stack(vma, address))) {
-		bad_area(regs, hw_error_code, address);
+		bad_area(regs, hw_error_code, address, NULL);
 		return;
 	}
 
@@ -1352,7 +1346,7 @@ retry:
 	 */
 good_area:
 	if (unlikely(access_error(hw_error_code, vma))) {
-		bad_area_access_error(regs, hw_error_code, address, vma);
+		bad_area(regs, hw_error_code, address, vma);
 		return;
 	}
 
