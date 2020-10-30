@@ -1608,6 +1608,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 		struct mmap_lock_waiter w;
 		if (mmap_write_f_lock_killable(mm, &w, __fine_writer))
 			return -EINTR;
+		// XXX try to avoid the mmap_vma_unlock / relock here
 		mmap_vma_lock(mm);
 		ret = __do_mmap(mm, file, addr, len, pgoff, flags, vm_flags,
 				uf);
