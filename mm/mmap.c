@@ -2980,6 +2980,7 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 	if (ctx->locked) {
 		VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
 		VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
+		VM_BUG_ON_MM(mm->mmap_lock.fine_readers.rb_node, mm);
 	} else if (mm->mmap_lock.coarse_count) {
 		return false;
 	} else if (mm_has_notifiers(mm) ||
@@ -2988,8 +2989,11 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 		 * MMU notifiers and uprobe callbacks currently expect to run
 		 * with a coarse lock held
 		 */
-		if (mm->mmap_lock.fine_writers)
+		if (mm->mmap_lock.fine_writers ||
+		    mm->mmap_lock.fine_readers.rb_node)
 			return false;
+	} else if (mmap_has_readers (mm, start, end)) {
+		return false;
 	} else {
 		fine_grained = true;
 	}
@@ -3015,7 +3019,8 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 			if (tmp->vm_ops == &mmap_write_lock_ops)
 				return false;
 			if (!vma_is_anonymous(tmp)) {
-				if (mm->mmap_lock.fine_writers)
+				if (mm->mmap_lock.fine_writers ||
+				    mm->mmap_lock.fine_readers.rb_node)
 					return false;
 				fine_grained = false;
 				break;
