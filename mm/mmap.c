@@ -1399,6 +1399,46 @@ static inline bool file_mmap_ok(struct file *file, struct inode *inode,
 	return true;
 }
 
+static bool __fine_writer(struct mm_struct *mm, struct mmap_lock_waiter *w)
+{
+	if (mm->mmap_lock.coarse_count)
+		return false;
+	mm->mmap_lock.fine_writers++;
+	return true;
+}
+
+static unsigned long __do_mmap(struct mm_struct *mm, struct file *file,
+		unsigned long addr, unsigned long len, unsigned long pgoff,
+		unsigned long flags, vm_flags_t vm_flags, struct list_head *uf)
+{
+	/* Too many mappings? */
+	if (mm->map_count > sysctl_max_map_count)
+		return -ENOMEM;
+
+	/* Obtain the address to map to. we verify (or select) it and ensure
+	 * that it represents a valid section of the address space.
+	 */
+	addr = get_unmapped_area(file, addr, len, pgoff, flags);
+	if (IS_ERR_VALUE(addr))
+		return addr;
+
+	if (flags & MAP_FIXED_NOREPLACE) {
+		struct vm_area_struct *vma = find_vma(mm, addr);
+
+		if (vma && vma->vm_start < addr + len)
+			return -EEXIST;
+	}
+
+	if (!file && !(vm_flags & VM_SHARED)) {
+		/*
+		 * Set pgoff according to addr for anon_vma.
+		 */
+		pgoff = addr >> PAGE_SHIFT;
+	}
+
+	return mmap_region(file, addr, len, vm_flags, pgoff, uf);
+}
+
 /*
  * The caller must write-lock current->mm->mmap_lock.
  */
@@ -1410,6 +1450,7 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 	struct mm_struct *mm = current->mm;
 	vm_flags_t vm_flags;
 	int pkey = 0;
+	unsigned long ret;
 
 	*populate = 0;
 
@@ -1561,47 +1602,34 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 			vm_flags |= VM_NORESERVE;
 	}
 
-	if (!locked && mmap_write_lock_killable(mm))
-		return -EINTR;
+	ret = -EAGAIN;
 
-	/* Too many mappings? */
-	if (mm->map_count > sysctl_max_map_count) {
-		addr = -ENOMEM;
-		goto unlock;
+	if (!locked && !file && !(flags & MAP_FIXED)) {
+		struct mmap_lock_waiter w;
+		if (mmap_write_f_lock_killable(mm, &w, __fine_writer))
+			return -EINTR;
+		mmap_vma_lock(mm);
+		ret = __do_mmap(mm, file, addr, len, pgoff, flags, vm_flags,
+				uf);
+		mm->mmap_lock.fine_writers--;
+		mmap_vma_f_unlock(mm, true);
 	}
 
-	/* Obtain the address to map to. we verify (or select) it and ensure
-	 * that it represents a valid section of the address space.
-	 */
-	addr = get_unmapped_area(file, addr, len, pgoff, flags);
-	if (IS_ERR_VALUE(addr))
-		goto unlock;
-
-	if (flags & MAP_FIXED_NOREPLACE) {
-		struct vm_area_struct *vma = find_vma(mm, addr);
-
-		if (vma && vma->vm_start < addr + len) {
-			addr = -EEXIST;
-			goto unlock;
-		}
+	if (IS_ERR_VALUE(ret)) {
+		if (!locked && mmap_write_lock_killable(mm))
+			return -EINTR;
+		ret = __do_mmap(mm, file, addr, len, pgoff, flags, vm_flags,
+				uf);
+		if (!locked)
+			mmap_write_unlock(mm);
 	}
-
-	if (!file && !(vm_flags & VM_SHARED)) {
-		/*
-		 * Set pgoff according to addr for anon_vma.
-		 */
-		pgoff = addr >> PAGE_SHIFT;
-	}
-
-	addr = mmap_region(file, addr, len, vm_flags, pgoff, uf);
-	if (!IS_ERR_VALUE(addr) &&
+	
+	if (!IS_ERR_VALUE(ret) &&
 	    ((vm_flags & VM_LOCKED) ||
 	     (flags & (MAP_POPULATE | MAP_NONBLOCK)) == MAP_POPULATE))
 		*populate = len;
-unlock:
-	if (!locked)
-		mmap_write_unlock(mm);
-	return addr;
+
+	return ret;
 }
 
 unsigned long ksys_mmap_pgoff(unsigned long addr, unsigned long len,
