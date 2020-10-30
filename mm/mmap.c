@@ -249,7 +249,7 @@ SYSCALL_DEFINE1(brk, unsigned long, brk)
 		 * mm->brk will be restored from origbrk.
 		 */
 		mm->brk = brk;
-		ret = __do_munmap(mm, newbrk, oldbrk-newbrk, &uf, true);
+		ret = __do_munmap(mm, newbrk, oldbrk-newbrk, true, &uf, true);
 		if (ret < 0) {
 			mm->brk = origbrk;
 			goto out;
@@ -2984,7 +2984,7 @@ static int __prepare_munmap(struct prepare_munmap_ctx *ctx)
  * Jeremy Fitzhardinge <jeremy@goop.org>
  */
 int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
-		struct list_head *uf, bool downgrade)
+		bool locked, struct list_head *uf, bool downgrade)
 {
 	struct prepare_munmap_ctx ctx;
 	struct mm_vm_stat vm_stat_updates = {};
@@ -3080,7 +3080,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 int do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	      struct list_head *uf)
 {
-	return __do_munmap(mm, start, len, uf, false);
+	return __do_munmap(mm, start, len, true, uf, false);
 }
 
 static int __vm_munmap(unsigned long start, size_t len, bool downgrade)
@@ -3092,7 +3092,7 @@ static int __vm_munmap(unsigned long start, size_t len, bool downgrade)
 	if (mmap_write_lock_killable(mm))
 		return -EINTR;
 
-	ret = __do_munmap(mm, start, len, &uf, downgrade);
+	ret = __do_munmap(mm, start, len, true, &uf, downgrade);
 	/*
 	 * Returning 1 indicates mmap_lock is downgraded.
 	 * But 1 is not legal return value of vm_munmap() and munmap(), reset
