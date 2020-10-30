@@ -390,7 +390,7 @@ static void validate_mm_rb(struct rb_root *root, struct vm_area_struct *ignore)
 static void validate_mm(struct mm_struct *mm)
 {
 	int bug = 0;
-	int i = 0;
+	int i = 0, j;
 	unsigned long highest_address = 0;
 	struct vm_area_struct *vma = mm->mmap;
 
@@ -409,10 +409,6 @@ static void validate_mm(struct mm_struct *mm)
 		vma = vma->vm_next;
 		i++;
 	}
-	if (i != mm->map_count) {
-		pr_emerg("map_count %d vm_next %d\n", mm->map_count, i);
-		bug = 1;
-	}
 	if (highest_address != mm->highest_vm_end) {
 		pr_emerg("mm->highest_vm_end %lx, found %lx\n",
 			  mm->highest_vm_end, highest_address);
@@ -428,10 +424,10 @@ static void validate_mm(struct mm_struct *mm)
 			 highest_address, TASK_SIZE);
 		bug = 1;
 	}
-	i = browse_rb(mm);
-	if (i != mm->map_count) {
-		if (i != -1)
-			pr_emerg("map_count %d rb %d\n", mm->map_count, i);
+	j = browse_rb(mm);
+	if (j != i) {
+		if (j != -1)
+			pr_emerg("map_count %d rb %d\n", i, j);
 		bug = 1;
 	}
 	VM_BUG_ON_MM(bug, mm);
@@ -3231,8 +3227,10 @@ void exit_mmap(struct mm_struct *mm)
 			nr_accounted += vma_pages(vma);
 		vma = remove_vma(vma);
 		cond_resched();
+		mm->map_count--;
 	}
 	vm_unacct_memory(nr_accounted);
+	VM_BUG_ON_MM(mm->map_count, mm);
 }
 
 /* Insert vm structure into process list sorted by address
