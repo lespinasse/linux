@@ -861,7 +861,8 @@ static inline bool bad_area_access_from_pkeys(unsigned long error_code,
 
 static noinline void
 bad_area(struct pt_regs *regs, unsigned long error_code,
-	 unsigned long address, struct vm_area_struct *vma)
+	 unsigned long address, struct vm_area_struct *vma,
+	 struct mmap_read_range *range)
 {
 	u32 pkey = 0;
 	int si_code = SEGV_MAPERR;
@@ -906,7 +907,7 @@ unlock:
 	 * Something tried to access memory that isn't in our memory map..
 	 * Fix it, but check if it's kernel or user first..
 	 */
-	mmap_read_unlock(current->mm);
+	mmap_read_range_unlock(current->mm, range);
 
 	__bad_area_nosemaphore(regs, error_code, address, pkey, si_code);
 }
@@ -1208,6 +1209,7 @@ void do_user_addr_fault(struct pt_regs *regs,
 			unsigned long hw_error_code,
 			unsigned long address)
 {
+	struct mmap_read_range *range;
 	struct vm_area_struct *vma;
 	struct task_struct *tsk;
 	struct mm_struct *mm;
@@ -1292,6 +1294,8 @@ void do_user_addr_fault(struct pt_regs *regs,
 	}
 #endif
 
+	range = NULL;
+
 	/*
 	 * Kernel-mode access to the user address space should only occur
 	 * on well-defined single instructions listed in the exception
@@ -1326,17 +1330,17 @@ retry:
 
 	vma = find_vma(mm, address);
 	if (unlikely(!vma)) {
-		bad_area(regs, hw_error_code, address, NULL);
+		bad_area(regs, hw_error_code, address, NULL, range);
 		return;
 	}
 	if (likely(vma->vm_start <= address))
 		goto good_area;
 	if (unlikely(!(vma->vm_flags & VM_GROWSDOWN))) {
-		bad_area(regs, hw_error_code, address, NULL);
+		bad_area(regs, hw_error_code, address, NULL, range);
 		return;
 	}
 	if (unlikely(expand_stack(vma, address))) {
-		bad_area(regs, hw_error_code, address, NULL);
+		bad_area(regs, hw_error_code, address, NULL, range);
 		return;
 	}
 
@@ -1346,7 +1350,7 @@ retry:
 	 */
 good_area:
 	if (unlikely(access_error(hw_error_code, vma))) {
-		bad_area(regs, hw_error_code, address, vma);
+		bad_area(regs, hw_error_code, address, vma, range);
 		return;
 	}
 
@@ -1363,7 +1367,7 @@ good_area:
 	 * userland). The return to userland is identified whenever
 	 * FAULT_FLAG_USER|FAULT_FLAG_KILLABLE are both set in flags.
 	 */
-	fault = handle_mm_fault(vma, address, flags, regs);
+	fault = handle_mm_fault_range(vma, address, flags, regs, range);
 
 	/* Quick path to respond to signals */
 	if (fault_signal_pending(fault, regs)) {
@@ -1384,7 +1388,7 @@ good_area:
 		goto retry;
 	}
 
-	mmap_read_unlock(mm);
+	mmap_read_range_unlock(mm, range);
 	if (unlikely(fault & VM_FAULT_ERROR)) {
 		mm_fault_error(regs, hw_error_code, address, fault);
 		return;
