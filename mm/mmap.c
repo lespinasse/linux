@@ -2626,22 +2626,17 @@ EXPORT_SYMBOL_GPL(find_extend_vma);
  *
  * Called with the mm semaphore held.
  */
-static void remove_vma_list(struct mm_struct *mm, struct vm_area_struct *vma)
+static void remove_vma_list(struct vm_area_struct *vma,
+		struct mm_vm_stat *stat, unsigned long *nr_accounted)
 {
-	unsigned long nr_accounted = 0;
-
-	/* Update high watermark before we lower total_vm */
-	update_hiwater_vm(mm);
 	do {
 		long nrpages = vma_pages(vma);
 
 		if (vma->vm_flags & VM_ACCOUNT)
-			nr_accounted += nrpages;
-		vm_stat_account(mm, vma->vm_flags, -nrpages);
+			*nr_accounted += nrpages;
+		do_vm_stat_account(stat, vma->vm_flags, nrpages);
 		vma = remove_vma(vma);
 	} while (vma);
-	vm_unacct_memory(nr_accounted);
-	validate_mm(mm);
 }
 
 /*
@@ -2792,6 +2787,8 @@ int split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 		struct list_head *uf, bool downgrade)
 {
+	struct mm_vm_stat vm_stat_updates = {};
+	unsigned long nr_accounted = 0;
 	unsigned long end;
 	struct vm_area_struct *vma, *prev, *last;
 
@@ -2894,7 +2891,16 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	unmap_region(mm, vma, prev, start, end);
 
 	/* Fix up all other VM information */
-	remove_vma_list(mm, vma);
+	remove_vma_list(vma, &vm_stat_updates, &nr_accounted);
+
+	/* Update high watermark before we lower total_vm */
+	update_hiwater_vm(mm);
+	mm->stat_vm.total -= vm_stat_updates.total;
+	mm->stat_vm.exec -= vm_stat_updates.exec;
+	mm->stat_vm.stack -= vm_stat_updates.stack;
+	mm->stat_vm.data -= vm_stat_updates.data;
+	vm_unacct_memory(nr_accounted);
+	validate_mm(mm);
 
 	return downgrade ? 1 : 0;
 }
@@ -3370,16 +3376,16 @@ bool may_expand_vm(struct mm_struct *mm, vm_flags_t flags, unsigned long npages)
 	return true;
 }
 
-void vm_stat_account(struct mm_struct *mm, vm_flags_t flags, long npages)
+void do_vm_stat_account(struct mm_vm_stat *stat, vm_flags_t flags, long npages)
 {
-	mm->stat_vm.total += npages;
+	stat->total += npages;
 
 	if (is_exec_mapping(flags))
-		mm->stat_vm.exec += npages;
+		stat->exec += npages;
 	else if (is_stack_mapping(flags))
-		mm->stat_vm.stack += npages;
+		stat->stack += npages;
 	else if (is_data_mapping(flags))
-		mm->stat_vm.data += npages;
+		stat->data += npages;
 }
 
 static vm_fault_t special_mapping_fault(struct vm_fault *vmf);

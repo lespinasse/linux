@@ -2528,7 +2528,13 @@ extern struct file *get_mm_exe_file(struct mm_struct *mm);
 extern struct file *get_task_exe_file(struct task_struct *task);
 
 extern bool may_expand_vm(struct mm_struct *, vm_flags_t, unsigned long npages);
-extern void vm_stat_account(struct mm_struct *, vm_flags_t, long npages);
+extern void do_vm_stat_account(struct mm_vm_stat *, vm_flags_t, long npages);
+
+static inline void
+vm_stat_account(struct mm_struct *mm, vm_flags_t flags, long npages)
+{
+	do_vm_stat_account(&mm->stat_vm, flags, npages);
+}
 
 extern bool vma_is_special_mapping(const struct vm_area_struct *vma,
 				   const struct vm_special_mapping *sm);
