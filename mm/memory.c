@@ -4504,6 +4504,32 @@ retry_pud:
 	return handle_pte_fault(&vmf);
 }
 
+vm_fault_t __prepare_mm_fault(struct vm_area_struct *vma, unsigned int flags)
+{
+	vm_fault_t ret = 0;
+
+	if (vma_is_anonymous(vma) ||
+	    ((flags & FAULT_FLAG_WRITE) && !(vma->vm_flags & VM_SHARED)) ||
+	    (is_vm_hugetlb_page(vma) && !(vma->vm_flags & VM_MAYSHARE))) {
+		if (flags & FAULT_FLAG_USER)
+			mem_cgroup_enter_user_fault();
+		if (unlikely(__anon_vma_prepare(vma)))
+			ret = VM_FAULT_OOM;
+		if (flags & FAULT_FLAG_USER) {
+			mem_cgroup_exit_user_fault();
+			/*
+			 * The task may have entered a memcg OOM situation but
+			 * if the allocation error was handled gracefully (no
+			 * VM_FAULT_OOM), there is no need to kill anything.
+			 * Just clean up the OOM state peacefully.
+			 */
+			if (task_in_memcg_oom(current) && !(ret & VM_FAULT_OOM))
+				mem_cgroup_oom_synchronize(false);
+		}
+	}
+	return ret;
+}
+
 /**
  * mm_account_fault - Do page fault accountings
  *

@@ -1667,6 +1667,15 @@ int generic_error_remove_page(struct address_space *mapping, struct page *page);
 int invalidate_inode_page(struct page *page);
 
 #ifdef CONFIG_MMU
+extern vm_fault_t __prepare_mm_fault(struct vm_area_struct *vma,
+		unsigned int flags);
+static inline vm_fault_t prepare_mm_fault(struct vm_area_struct *vma,
+		unsigned int flags)
+{
+	if (likely(vma->anon_vma))
+		return 0;
+	return __prepare_mm_fault(vma, flags);
+}
 extern vm_fault_t handle_mm_fault_range(struct vm_area_struct *vma,
 		unsigned long address, unsigned int flags,
 		struct pt_regs *regs, struct mmap_read_range *range);
@@ -1684,6 +1693,11 @@ void unmap_mapping_pages(struct address_space *mapping,
 void unmap_mapping_range(struct address_space *mapping,
 		loff_t const holebegin, loff_t const holelen, int even_cows);
 #else
+static inline vm_fault_t prepare_mm_fault(struct vm_area_struct *vma,
+		unsigned int flags)
+{
+	return 0;
+}
 static inline vm_fault_t handle_mm_fault(struct vm_area_struct *vma,
 					 unsigned long address, unsigned int flags,
 					 struct pt_regs *regs)
