@@ -2777,27 +2777,12 @@ int split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 	return __split_vma(mm, vma, addr, new_below);
 }
 
-/* Munmap is split into 2 main parts -- this part which finds
- * what needs doing, and the areas themselves, which do the
- * work.  This now handles partial unmappings.
- * Jeremy Fitzhardinge <jeremy@goop.org>
- */
-int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
-		struct list_head *uf, bool downgrade)
+static int __prepare_munmap(struct mm_struct *mm,
+		unsigned long start, unsigned long end,
+		struct list_head *uf, bool *downgrade,
+		struct vm_area_struct **pvma, struct vm_area_struct **pprev)
 {
-	struct mm_vm_stat vm_stat_updates = {};
-	unsigned long nr_accounted = 0, nr_unlocked = 0;
-	int nr_vmas;
-	unsigned long end;
 	struct vm_area_struct *vma, *prev, *last;
-
-	if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
-		return -EINVAL;
-
-	len = PAGE_ALIGN(len);
-	end = start + len;
-	if (len == 0)
-		return -EINVAL;
 
 	/* Find the first overlapping VMA */
 	vma = find_vma(mm, start);
@@ -2862,7 +2847,39 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 
 	/* Detach vmas from rbtree */
 	if (!detach_vmas_to_be_unmapped(mm, vma, prev, end))
-		downgrade = false;
+		*downgrade = false;
+
+	*pvma = vma;
+	*pprev = prev;
+	return 0;
+}
+
+/* Munmap is split into 2 main parts -- this part which finds
+ * what needs doing, and the areas themselves, which do the
+ * work.  This now handles partial unmappings.
+ * Jeremy Fitzhardinge <jeremy@goop.org>
+ */
+int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
+		struct list_head *uf, bool downgrade)
+{
+	struct mm_vm_stat vm_stat_updates = {};
+	unsigned long nr_accounted = 0, nr_unlocked = 0;
+	int nr_vmas;
+	unsigned long end;
+	struct vm_area_struct *vma = NULL, *prev;
+	int error;
+
+	if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
+		return -EINVAL;
+
+	len = PAGE_ALIGN(len);
+	end = start + len;
+	if (len == 0)
+		return -EINVAL;
+
+	error = __prepare_munmap(mm, start, end, uf, &downgrade, &vma, &prev);
+	if (!vma)
+		return error;
 
 	/*
 	 * unlock any mlock()ed ranges
