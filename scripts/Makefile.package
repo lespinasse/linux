@@ -82,6 +82,14 @@ bindeb-pkg:
 	$(CONFIG_SHELL) $(srctree)/scripts/package/mkdebian
 	+dpkg-buildpackage -r$(KBUILD_PKG_ROOTCMD) -a$$(cat debian/arch) $(DPKG_FLAGS) -b -nc -uc
 
+PHONY += gdeb-pkg
+gdeb-pkg:
+	@echo "Building debian kernel-image package..."
+	KDEB_PKGVERSION=1 $(CONFIG_SHELL) $(srctree)/scripts/package/mkdebian
+	@if test ! -e pkgs; then mkdir pkgs; echo "*" > pkgs/.gitignore; fi
+	+UPLOAD_DIR=pkgs NO_HEADER_PACKAGES=1 dpkg-buildpackage -r$(KBUILD_PKG_ROOTCMD) -a$$(cat debian/arch) $(DPKG_FLAGS) -b -nc -uc --buildinfo-option=-upkgs --changes-option=-q --changes-option=-upkgs
+	@version="$(KERNELRELEASE)_1_$$(cat debian/arch)" && rm -f "pkgs/linux-$${version}.buildinfo" "../linux-$${version}.changes" && ln -sf "linux-image-$${version}.deb" "pkgs/LATEST.deb"
+
 PHONY += intdeb-pkg
 intdeb-pkg:
 	+$(CONFIG_SHELL) $(srctree)/scripts/package/builddeb
