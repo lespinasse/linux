@@ -305,9 +305,17 @@ struct mmap_lock {
 	struct list_head head;
 	long coarse_count;	/* Coarse readers, or -1 for coarse writer. */
 	long fine_writers;	/* Number of fine grained writers. */
+	struct rb_root fine_readers;
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map dep_map;
 #endif
+};
+
+struct mmap_read_range {
+        struct rb_node rb;
+        unsigned long start;            /* First address of the range. */
+        unsigned long end;              /* First address after the range. */
+	unsigned long __subtree_end;	/* Largest end in subtree. */
 };
 #endif
 

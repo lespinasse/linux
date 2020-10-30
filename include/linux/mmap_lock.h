@@ -18,6 +18,7 @@
 	.head = LIST_HEAD_INIT((name).mmap_lock.head),		\
 	.coarse_count = 0,					\
 	.fine_writers = 0,					\
+	.fine_readers = RB_ROOT,				\
 	MMAP_LOCK_DEP_MAP_INITIALIZER((name).mmap_lock)		\
 },
 
@@ -29,6 +30,7 @@ static inline void mmap_init_lock(struct mm_struct *mm)
 	INIT_LIST_HEAD(&mm->mmap_lock.head);
 	mm->mmap_lock.coarse_count = 0;
 	mm->mmap_lock.fine_writers = 0;
+	mm->mmap_lock.fine_readers = RB_ROOT;
 	lockdep_init_map(&mm->mmap_lock.dep_map, "&mm->mmap_lock", &__key, 0);
 }
 
@@ -62,6 +64,7 @@ static inline void mmap_assert_write_locked(struct mm_struct *mm)
 	lockdep_assert_held_write(&mm->mmap_lock);
 	VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
 	VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
+	VM_BUG_ON_MM(mm->mmap_lock.fine_readers.rb_node, mm);
 }
 
 
@@ -196,6 +199,15 @@ static inline void mmap_vma_f_unlock(struct mm_struct *mm, bool dequeue)
 		wake_up_q(&wake_q);
 	lock_release(&mm->mmap_lock.dep_map, _RET_IP_);
 }
+
+extern void mmap_insert_read_range(struct mm_struct *mm,
+				   struct mmap_read_range *range);
+extern void mmap_remove_read_range(struct mm_struct *mm,
+				   struct mmap_read_range *range);
+extern bool mmap_has_readers(struct mm_struct *mm,
+			     unsigned long start, unsigned long end);
+extern void mmap_read_range_unlock(struct mm_struct *mm,
+				   struct mmap_read_range *range);
 
 #else /* !CONFIG_MMAP_LOCK_queued */
 

@@ -4,6 +4,98 @@
 #include <linux/sched.h>
 #include <linux/sched/signal.h>
 #include <linux/sched/wake_q.h>
+#include <linux/rbtree_augmented.h>
+
+#define END(range)	((range)->end)
+RB_DECLARE_CALLBACKS_MAX(static, augment, struct mmap_read_range, rb,
+			 unsigned long, __subtree_end, END);
+
+void mmap_insert_read_range(struct mm_struct *mm,
+			    struct mmap_read_range *range)
+{
+	struct rb_node **link = &mm->mmap_lock.fine_readers.rb_node;
+	struct rb_node *rb_parent = NULL;
+	unsigned long start = range->start, end = range->end;
+	struct mmap_read_range *parent;
+
+	while (*link) {
+		rb_parent = *link;
+		parent = rb_entry(rb_parent, struct mmap_read_range, rb);
+		if (parent->__subtree_end < end)
+			parent->__subtree_end = end;
+		if (start < parent->start)
+			link = &parent->rb.rb_left;
+		else
+			link = &parent->rb.rb_right;
+	}
+
+	range->__subtree_end = end;
+	rb_link_node(&range->rb, rb_parent, link);
+	rb_insert_augmented(&range->rb, &mm->mmap_lock.fine_readers, &augment);
+}
+EXPORT_SYMBOL(mmap_insert_read_range);
+
+void mmap_remove_read_range(struct mm_struct *mm,
+			    struct mmap_read_range *range)
+{
+	rb_erase_augmented(&range->rb, &mm->mmap_lock.fine_readers, &augment);
+}
+EXPORT_SYMBOL(mmap_remove_read_range);
+
+/*
+ * Check for any mmap lock ranges intersecting [start;end)
+ *
+ * Note that a range intersects [start;end) iff:
+ *   Cond1: range->start < end
+ * and
+ *   Cond2: start < range->end
+ */
+
+bool mmap_has_readers(struct mm_struct *mm,
+		      unsigned long start, unsigned long end)
+{
+	struct mmap_read_range *range;
+
+	if (!mm->mmap_lock.fine_readers.rb_node)
+		return false;
+	range = rb_entry(mm->mmap_lock.fine_readers.rb_node,
+			 struct mmap_read_range, rb);
+	while (true) {
+		if (range->__subtree_end <= start)
+			return false;		/* !Cond2 everywhere */
+
+		if (range->start >= end) {
+			/*
+			 * Cond1 is not satisfied by current range or any
+			 * ones on right tree. Descend onto left tree.
+			 */
+			if (!range->rb.rb_left)
+				return false;
+			range = rb_entry(range->rb.rb_left,
+					 struct mmap_read_range, rb);
+			continue;
+		}
+
+		/*
+		 * Cond1 is satisfied by current and all ranges on left tree.
+		 * It may also be satisfied by some ranges on right tree.
+		 */
+		if (start < range->end)
+			return true;		/* Cond2 */
+		if (range->rb.rb_left) {
+			struct mmap_read_range *left = rb_entry(
+				range->rb.rb_left,struct mmap_read_range, rb);
+			if (start < left->__subtree_end)
+				return true;	/* Cond2 somewhere left */
+		}
+		/* Descend onto right tree. */
+		if (!range->rb.rb_right)
+			return false;
+		range = rb_entry(range->rb.rb_right,
+				 struct mmap_read_range, rb);
+	}
+}
+EXPORT_SYMBOL(mmap_has_readers);
 
 /*
  * mmap_lock_dequeue wakes up waiters and passes them the mmap lock.
@@ -112,7 +204,9 @@ EXPORT_SYMBOL(mmap_f_lock_killable_slow);
 
 static inline bool writer_f(struct mm_struct *mm, struct mmap_lock_waiter *w)
 {
-	if (mm->mmap_lock.coarse_count || mm->mmap_lock.fine_writers)
+	if (mm->mmap_lock.coarse_count ||
+	    mm->mmap_lock.fine_writers ||
+	    mm->mmap_lock.fine_readers.rb_node)
 		return false;
 	mm->mmap_lock.coarse_count = -1;
 	return true;
@@ -200,6 +294,7 @@ void mmap_write_unlock(struct mm_struct *mm)
 	mmap_vma_lock(mm);
 	VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
 	VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
+	VM_BUG_ON_MM(mm->mmap_lock.fine_readers.rb_node, mm);
 	mm->mmap_lock.coarse_count = 0;
 	mmap_vma_f_unlock(mm, true);
 }
@@ -212,6 +307,7 @@ void mmap_write_downgrade(struct mm_struct *mm)
 	mmap_vma_lock(mm);
 	VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
 	VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
+	VM_BUG_ON_MM(mm->mmap_lock.fine_readers.rb_node, mm);
 	mm->mmap_lock.coarse_count = 1;
 	if (!list_empty(&mm->mmap_lock.head))
 		mmap_lock_dequeue(mm, &wake_q);
@@ -280,3 +376,22 @@ void mmap_read_unlock(struct mm_struct *mm)
 	mmap_vma_f_unlock(mm, !mm->mmap_lock.coarse_count);
 }
 EXPORT_SYMBOL(mmap_read_unlock);
+
+void mmap_read_range_unlock(struct mm_struct *mm,
+			    struct mmap_read_range *range)
+{
+	bool dequeue = true;
+
+	mmap_vma_lock(mm);
+	if (range) {
+		VM_BUG_ON_MM(mm->mmap_lock.coarse_count < 0, mm);
+		mmap_remove_read_range(mm, range);
+	} else {
+		VM_BUG_ON_MM(mm->mmap_lock.coarse_count <= 0, mm);
+		VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
+		mm->mmap_lock.coarse_count--;
+		dequeue = !mm->mmap_lock.coarse_count;
+	}
+        mmap_vma_f_unlock(mm, dequeue);
+}
+EXPORT_SYMBOL(mmap_read_range_unlock);
