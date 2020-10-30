@@ -303,7 +303,7 @@ struct vm_userfaultfd_ctx {};
 struct mmap_lock {
 	struct mutex mutex;
 	struct list_head head;
-	long count;	/* readers count, or -1 when write locked. */
+	long coarse_count;	/* Coarse readers, or -1 for coarse writer. */
 #ifdef CONFIG_DEBUG_LOCK_ALLOC
 	struct lockdep_map dep_map;
 #endif
