@@ -2865,12 +2865,16 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 			return error;
 	}
 
+	/* Detach vmas from rbtree */
+	if (!detach_vmas_to_be_unmapped(mm, vma, prev, end))
+		downgrade = false;
+
 	/*
-	 * unlock any mlock()ed ranges before detaching vmas
+	 * unlock any mlock()ed ranges
 	 */
 	if (mm->locked_vm) {
 		struct vm_area_struct *tmp = vma;
-		while (tmp && tmp->vm_start < end) {
+		while (tmp) {
 			if (tmp->vm_flags & VM_LOCKED) {
 				nr_unlocked += vma_pages(tmp);
 				munlock_vma_pages_all(tmp);
@@ -2878,10 +2882,6 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 			tmp = tmp->vm_next;
 		}
 	}
-
-	/* Detach vmas from rbtree */
-	if (!detach_vmas_to_be_unmapped(mm, vma, prev, end))
-		downgrade = false;
 
 	if (downgrade)
 		mmap_write_downgrade(mm);
