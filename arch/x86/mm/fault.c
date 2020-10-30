@@ -1194,7 +1194,7 @@ static bool __pf_mmap_lock(struct mm_struct *mm, struct mmap_lock_waiter *w)
 		return true;
 	}
 
-	if (!vma_is_anonymous(vma)) {
+	if (!vma_is_anonymous(vma) && !vma->vm_ops->fine_grained) {
 		/*
 		 * We need a coarse read lock to process faults in this vma.
 		 */
