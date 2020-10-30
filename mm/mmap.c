@@ -2954,7 +2954,7 @@ static void mmap_write_lock_close(struct vm_area_struct *vma)
 {
 }
 
-static const struct vm_operations_struct mmap_write_lock_ops = {
+const struct vm_operations_struct mmap_write_lock_ops = {
        .close = mmap_write_lock_close,
 };
 

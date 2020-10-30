@@ -209,6 +209,8 @@ extern bool mmap_has_readers(struct mm_struct *mm,
 extern void mmap_read_range_unlock(struct mm_struct *mm,
 				   struct mmap_read_range *range);
 
+extern const struct vm_operations_struct mmap_write_lock_ops;
+
 #else /* !CONFIG_MMAP_LOCK_queued */
 
 #define MMAP_LOCK_INITIALIZER(name) \
