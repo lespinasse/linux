@@ -484,12 +484,14 @@ struct mm_struct {
 		unsigned long hiwater_rss; /* High-watermark of RSS usage */
 		unsigned long hiwater_vm;  /* High-water virtual memory usage */
 
-		unsigned long total_vm;	   /* Total pages mapped */
+		struct mm_vm_stat {
+			unsigned long total;	   /* Total pages mapped */
+			unsigned long data;	   /* VM_WRITE & ~VM_SHARED & ~VM_STACK */
+			unsigned long exec;	   /* VM_EXEC & ~VM_WRITE & ~VM_STACK */
+			unsigned long stack;	   /* VM_STACK */
+		} stat_vm;
 		unsigned long locked_vm;   /* Pages that have PG_mlocked set */
 		atomic64_t    pinned_vm;   /* Refcount permanently increased */
-		unsigned long data_vm;	   /* VM_WRITE & ~VM_SHARED & ~VM_STACK */
-		unsigned long exec_vm;	   /* VM_EXEC & ~VM_WRITE & ~VM_STACK */
-		unsigned long stack_vm;	   /* VM_STACK */
 		unsigned long def_flags;
 
 		spinlock_t arg_lock; /* protect the below fields */

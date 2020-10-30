@@ -2215,7 +2215,7 @@ pfm_smpl_buffer_alloc(struct task_struct *task, struct file *filp, pfm_context_t
 	 * XXX: may have to refine this test
 	 * Check against address space limit.
 	 *
-	 * if ((mm->total_vm << PAGE_SHIFT) + len> task->rlim[RLIMIT_AS].rlim_cur)
+	 * if ((mm->stat_vm.total << PAGE_SHIFT) + len> task->rlim[RLIMIT_AS].rlim_cur)
 	 * 	return -ENOMEM;
 	 */
 	if (size > task_rlimit(task, RLIMIT_MEMLOCK))

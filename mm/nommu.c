@@ -1252,7 +1252,7 @@ unsigned long do_mmap(struct file *file,
 	/* okay... we have a mapping; now we have to register it */
 	result = vma->vm_start;
 
-	current->mm->total_vm += len >> PAGE_SHIFT;
+	current->mm->stat_vm.total += len >> PAGE_SHIFT;
 
 share:
 	add_vma_to_mm(current->mm, vma);
@@ -1547,7 +1547,7 @@ void exit_mmap(struct mm_struct *mm)
 	if (!mm)
 		return;
 
-	mm->total_vm = 0;
+	mm->stat_vm.total = 0;
 
 	while ((vma = mm->mmap)) {
 		mm->mmap = vma->vm_next;

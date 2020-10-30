@@ -26,7 +26,7 @@ TRACE_EVENT(vm_unmapped_area,
 
 	TP_fast_assign(
 		__entry->addr = addr;
-		__entry->total_vm = current->mm->total_vm;
+		__entry->total_vm = current->mm->stat_vm.total;
 		__entry->flags = info->flags;
 		__entry->length = info->length;
 		__entry->low_limit = info->low_limit;

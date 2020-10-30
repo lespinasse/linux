@@ -1927,7 +1927,7 @@ static inline unsigned long get_mm_hiwater_rss(struct mm_struct *mm)
 
 static inline unsigned long get_mm_hiwater_vm(struct mm_struct *mm)
 {
-	return max(mm->hiwater_vm, mm->total_vm);
+	return max(mm->hiwater_vm, mm->stat_vm.total);
 }
 
 static inline void update_hiwater_rss(struct mm_struct *mm)
@@ -1940,8 +1940,8 @@ static inline void update_hiwater_rss(struct mm_struct *mm)
 
 static inline void update_hiwater_vm(struct mm_struct *mm)
 {
-	if (mm->hiwater_vm < mm->total_vm)
-		mm->hiwater_vm = mm->total_vm;
+	if (mm->hiwater_vm < mm->stat_vm.total)
+		mm->hiwater_vm = mm->stat_vm.total;
 }
 
 static inline void reset_mm_hiwater_rss(struct mm_struct *mm)

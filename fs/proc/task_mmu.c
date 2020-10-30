@@ -43,7 +43,7 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 	 * and rss too, which will usually be the higher.  Barriers? not
 	 * worth the effort, such snapshots can always be inconsistent.
 	 */
-	hiwater_vm = total_vm = mm->total_vm;
+	hiwater_vm = total_vm = mm->stat_vm.total;
 	if (hiwater_vm < mm->hiwater_vm)
 		hiwater_vm = mm->hiwater_vm;
 	hiwater_rss = total_rss = anon + file + shmem;
@@ -52,8 +52,8 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 
 	/* split executable areas between text and lib */
 	text = PAGE_ALIGN(mm->end_code) - (mm->start_code & PAGE_MASK);
-	text = min(text, mm->exec_vm << PAGE_SHIFT);
-	lib = (mm->exec_vm << PAGE_SHIFT) - text;
+	text = min(text, mm->stat_vm.exec << PAGE_SHIFT);
+	lib = (mm->stat_vm.exec << PAGE_SHIFT) - text;
 
 	swap = get_mm_counter(mm, MM_SWAPENTS);
 	SEQ_PUT_DEC("VmPeak:\t", hiwater_vm);
@@ -65,8 +65,8 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 	SEQ_PUT_DEC(" kB\nRssAnon:\t", anon);
 	SEQ_PUT_DEC(" kB\nRssFile:\t", file);
 	SEQ_PUT_DEC(" kB\nRssShmem:\t", shmem);
-	SEQ_PUT_DEC(" kB\nVmData:\t", mm->data_vm);
-	SEQ_PUT_DEC(" kB\nVmStk:\t", mm->stack_vm);
+	SEQ_PUT_DEC(" kB\nVmData:\t", mm->stat_vm.data);
+	SEQ_PUT_DEC(" kB\nVmStk:\t", mm->stat_vm.stack);
 	seq_put_decimal_ull_width(m,
 		    " kB\nVmExe:\t", text >> 10, 8);
 	seq_put_decimal_ull_width(m,
@@ -81,7 +81,7 @@ void task_mem(struct seq_file *m, struct mm_struct *mm)
 
 unsigned long task_vsize(struct mm_struct *mm)
 {
-	return PAGE_SIZE * mm->total_vm;
+	return PAGE_SIZE * mm->stat_vm.total;
 }
 
 unsigned long task_statm(struct mm_struct *mm,
@@ -92,9 +92,9 @@ unsigned long task_statm(struct mm_struct *mm,
 			get_mm_counter(mm, MM_SHMEMPAGES);
 	*text = (PAGE_ALIGN(mm->end_code) - (mm->start_code & PAGE_MASK))
 								>> PAGE_SHIFT;
-	*data = mm->data_vm + mm->stack_vm;
+	*data = mm->stat_vm.data + mm->stat_vm.stack;
 	*resident = *shared + get_mm_counter(mm, MM_ANONPAGES);
-	return mm->total_vm;
+	return mm->stat_vm.total;
 }
 
 #ifdef CONFIG_NUMA

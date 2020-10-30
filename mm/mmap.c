@@ -3113,8 +3113,8 @@ static int do_brk_flags(unsigned long addr, unsigned long len, unsigned long fla
 	vma_link(mm, vma, prev, rb_link, rb_parent);
 out:
 	perf_event_mmap(vma);
-	mm->total_vm += len >> PAGE_SHIFT;
-	mm->data_vm += len >> PAGE_SHIFT;
+	mm->stat_vm.total += len >> PAGE_SHIFT;
+	mm->stat_vm.data += len >> PAGE_SHIFT;
 	if (flags & VM_LOCKED)
 		mm->locked_vm += (len >> PAGE_SHIFT);
 	vma->vm_flags |= VM_SOFTDIRTY;
@@ -3347,19 +3347,19 @@ out:
  */
 bool may_expand_vm(struct mm_struct *mm, vm_flags_t flags, unsigned long npages)
 {
-	if (mm->total_vm + npages > rlimit(RLIMIT_AS) >> PAGE_SHIFT)
+	if (mm->stat_vm.total + npages > rlimit(RLIMIT_AS) >> PAGE_SHIFT)
 		return false;
 
 	if (is_data_mapping(flags) &&
-	    mm->data_vm + npages > rlimit(RLIMIT_DATA) >> PAGE_SHIFT) {
+	    mm->stat_vm.data + npages > rlimit(RLIMIT_DATA) >> PAGE_SHIFT) {
 		/* Workaround for Valgrind */
 		if (rlimit(RLIMIT_DATA) == 0 &&
-		    mm->data_vm + npages <= rlimit_max(RLIMIT_DATA) >> PAGE_SHIFT)
+		    mm->stat_vm.data + npages <= rlimit_max(RLIMIT_DATA) >> PAGE_SHIFT)
 			return true;
 
 		pr_warn_once("%s (%d): VmData %lu exceed data ulimit %lu. Update limits%s.\n",
 			     current->comm, current->pid,
-			     (mm->data_vm + npages) << PAGE_SHIFT,
+			     (mm->stat_vm.data + npages) << PAGE_SHIFT,
 			     rlimit(RLIMIT_DATA),
 			     ignore_rlimit_data ? "" : " or use boot option ignore_rlimit_data");
 
@@ -3372,14 +3372,14 @@ bool may_expand_vm(struct mm_struct *mm, vm_flags_t flags, unsigned long npages)
 
 void vm_stat_account(struct mm_struct *mm, vm_flags_t flags, long npages)
 {
-	mm->total_vm += npages;
+	mm->stat_vm.total += npages;
 
 	if (is_exec_mapping(flags))
-		mm->exec_vm += npages;
+		mm->stat_vm.exec += npages;
 	else if (is_stack_mapping(flags))
-		mm->stack_vm += npages;
+		mm->stat_vm.stack += npages;
 	else if (is_data_mapping(flags))
-		mm->data_vm += npages;
+		mm->stat_vm.data += npages;
 }
 
 static vm_fault_t special_mapping_fault(struct vm_fault *vmf);

@@ -820,7 +820,7 @@ SYSCALL_DEFINE1(mlockall, int, flags)
 		return -EINTR;
 
 	ret = -ENOMEM;
-	if (!(flags & MCL_CURRENT) || (current->mm->total_vm <= lock_limit) ||
+	if (!(flags & MCL_CURRENT) || (current->mm->stat_vm.total <= lock_limit) ||
 	    capable(CAP_IPC_LOCK))
 		ret = apply_mlockall_flags(flags);
 	mmap_write_unlock(current->mm);

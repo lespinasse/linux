@@ -489,10 +489,7 @@ static __latent_entropy int dup_mmap(struct mm_struct *mm,
 	/* No ordering required: file already has been exposed. */
 	RCU_INIT_POINTER(mm->exe_file, get_mm_exe_file(oldmm));
 
-	mm->total_vm = oldmm->total_vm;
-	mm->data_vm = oldmm->data_vm;
-	mm->exec_vm = oldmm->exec_vm;
-	mm->stack_vm = oldmm->stack_vm;
+	mm->stat_vm = oldmm->stat_vm;
 
 	rb_link = &mm->mm_rb.rb_node;
 	rb_parent = NULL;
@@ -1357,7 +1354,7 @@ static struct mm_struct *dup_mm(struct task_struct *tsk,
 		goto free_pt;
 
 	mm->hiwater_rss = get_mm_rss(mm);
-	mm->hiwater_vm = mm->total_vm;
+	mm->hiwater_vm = mm->stat_vm.total;
 
 	if (mm->binfmt && !try_module_get(mm->binfmt->module))
 		goto free_pt;
