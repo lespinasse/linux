@@ -2786,7 +2786,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 		struct list_head *uf, bool downgrade)
 {
 	struct mm_vm_stat vm_stat_updates = {};
-	unsigned long nr_accounted = 0;
+	unsigned long nr_accounted = 0, nr_unlocked = 0;
 	int nr_vmas;
 	unsigned long end;
 	struct vm_area_struct *vma, *prev, *last;
@@ -2872,10 +2872,9 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 		struct vm_area_struct *tmp = vma;
 		while (tmp && tmp->vm_start < end) {
 			if (tmp->vm_flags & VM_LOCKED) {
-				mm->locked_vm -= vma_pages(tmp);
+				nr_unlocked += vma_pages(tmp);
 				munlock_vma_pages_all(tmp);
 			}
-
 			tmp = tmp->vm_next;
 		}
 	}
@@ -2899,6 +2898,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	mm->stat_vm.stack -= vm_stat_updates.stack;
 	mm->stat_vm.data -= vm_stat_updates.data;
 	vm_unacct_memory(nr_accounted);
+	mm->locked_vm -= nr_unlocked;
 	mm->map_count -= nr_vmas;
 	validate_mm(mm);
 
