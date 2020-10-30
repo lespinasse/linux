@@ -2778,12 +2778,19 @@ int split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 	return __split_vma(mm, vma, addr, new_below);
 }
 
-static int __prepare_munmap(struct mm_struct *mm,
-		unsigned long start, unsigned long end,
-		struct list_head *uf, bool *downgrade,
-		struct vm_area_struct **pvma, struct vm_area_struct **pprev)
+struct prepare_munmap_ctx {
+	struct mm_struct *mm;
+	unsigned long start, end;
+	struct list_head *uf;
+	bool downgrade;
+	struct vm_area_struct *vmas, *prev;
+};
+
+static int __prepare_munmap(struct prepare_munmap_ctx *ctx)
 {
 	struct vm_area_struct *vma, *prev, *last;
+	struct mm_struct *mm = ctx->mm;
+	unsigned long start = ctx->start, end = ctx->end;
 
 	/* Find the first overlapping VMA */
 	vma = find_vma(mm, start);
@@ -2829,7 +2836,7 @@ static int __prepare_munmap(struct mm_struct *mm,
 	}
 	vma = prev ? prev->vm_next : mm->mmap;
 
-	if (unlikely(uf)) {
+	if (unlikely(ctx->uf)) {
 		/*
 		 * If userfaultfd_unmap_prep returns an error the vmas
 		 * will remain splitted, but userland will get a
@@ -2839,7 +2846,7 @@ static int __prepare_munmap(struct mm_struct *mm,
 		 * split, despite we could. This is unlikely enough
 		 * failure that it's not worth optimizing it for.
 		 */
-		int error = userfaultfd_unmap_prep(vma, start, end, uf);
+		int error = userfaultfd_unmap_prep(vma, start, end, ctx->uf);
 		if (error)
 			return error;
 	}
@@ -2848,10 +2855,10 @@ static int __prepare_munmap(struct mm_struct *mm,
 
 	/* Detach vmas from rbtree */
 	if (!detach_vmas_to_be_unmapped(mm, vma, prev, end))
-		*downgrade = false;
+		ctx->downgrade = false;
 
-	*pvma = vma;
-	*pprev = prev;
+	ctx->vmas = vma;
+	ctx->prev = prev;
 	return 0;
 }
 
@@ -2863,11 +2870,12 @@ static int __prepare_munmap(struct mm_struct *mm,
 int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 		struct list_head *uf, bool downgrade)
 {
+	struct prepare_munmap_ctx ctx;
 	struct mm_vm_stat vm_stat_updates = {};
 	unsigned long nr_accounted = 0, nr_unlocked = 0;
 	int nr_vmas;
 	unsigned long end;
-	struct vm_area_struct *vma = NULL, *prev, *next;
+	struct vm_area_struct *next;
 	int error;
 
 	if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
@@ -2878,15 +2886,21 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (len == 0)
 		return -EINVAL;
 
-	error = __prepare_munmap(mm, start, end, uf, &downgrade, &vma, &prev);
-	if (!vma)
+	ctx.mm = mm;
+	ctx.start = start;
+	ctx.end = end;
+	ctx.uf = uf;
+	ctx.downgrade = downgrade;
+	ctx.vmas = NULL;
+	error = __prepare_munmap(&ctx);
+	if (!ctx.vmas)
 		return error;
 
 	/*
 	 * unlock any mlock()ed ranges
 	 */
 	if (mm->locked_vm) {
-		struct vm_area_struct *tmp = vma;
+		struct vm_area_struct *tmp = ctx.vmas;
 		while (tmp) {
 			if (tmp->vm_flags & VM_LOCKED) {
 				nr_unlocked += vma_pages(tmp);
@@ -2896,16 +2910,16 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 		}
 	}
 
-	if (downgrade)
+	if (ctx.downgrade)
 		mmap_write_downgrade(mm);
 
-	next = prev ? prev->vm_next : mm->mmap;
-	unmap_region(mm, vma, start, end,
-		     prev ? prev->vm_end : FIRST_USER_ADDRESS,
+	next = ctx.prev ? ctx.prev->vm_next : mm->mmap;
+	unmap_region(mm, ctx.vmas, start, end,
+		     ctx.prev ? ctx.prev->vm_end : FIRST_USER_ADDRESS,
 		     next ? next->vm_start : USER_PGTABLES_CEILING);
 
 	/* Fix up all other VM information */
-	nr_vmas = remove_vma_list(vma, &vm_stat_updates, &nr_accounted);
+	nr_vmas = remove_vma_list(ctx.vmas, &vm_stat_updates, &nr_accounted);
 
 	/* Update high watermark before we lower total_vm */
 	update_hiwater_vm(mm);
@@ -2918,7 +2932,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	mm->map_count -= nr_vmas;
 	validate_mm(mm);
 
-	return downgrade ? 1 : 0;
+	return ctx.downgrade ? 1 : 0;
 }
 
 int do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
