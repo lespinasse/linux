@@ -2909,11 +2909,24 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 	struct vm_area_struct *vma, *prev, *last;
 	unsigned long start = ctx->lock.vm_start, end = ctx->lock.vm_end;
 	struct rb_node **rb_link, *rb_parent;
+	bool fine_grained = false;
 
-	if (ctx->locked)
+	if (ctx->locked) {
 		VM_BUG_ON_MM(mm->mmap_lock.coarse_count != -1, mm);
-        else if (mm->mmap_lock.coarse_count)
-                return false;
+		VM_BUG_ON_MM(mm->mmap_lock.fine_writers, mm);
+	} else if (mm->mmap_lock.coarse_count) {
+		return false;
+	} else if (mm_has_notifiers(mm) ||
+		   test_bit(MMF_HAS_UPROBES, &mm->flags)) {
+		/*
+		 * MMU notifiers and uprobe callbacks currently expect to run
+		 * with a coarse lock held
+		 */
+		if (mm->mmap_lock.fine_writers)
+			return false;
+	} else {
+		fine_grained = true;
+	}
 
 	/* Find the first overlapping VMA */
 	vma = find_vma(mm, start);
@@ -2925,6 +2938,25 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 	/* if it doesn't overlap, we have nothing.. */
 	if (vma->vm_start >= end)
 		return true;
+
+	if (fine_grained) {
+		/*
+		 * scan vmas within unmap range to check for existing locks,
+		 * or VMA types that require a coarse lock.
+		 */
+		struct vm_area_struct *tmp = vma;
+                while (tmp && tmp->vm_start < end) {
+			if (tmp->vm_ops == &mmap_write_lock_ops)
+				return false;
+			if (!vma_is_anonymous(tmp)) {
+				if (mm->mmap_lock.fine_writers)
+					return false;
+				fine_grained = false;
+				break;
+			}
+			tmp = tmp->vm_next;
+		}
+	}
 
 	/*
 	 * If we need to split any vma, do it now to save pain later.
@@ -2941,6 +2973,8 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 		 */
 		if (end < vma->vm_end &&
 		    mm->map_count >= sysctl_max_map_count) {
+			if (mm->mmap_lock.fine_writers)
+				return false;
 			ctx->error = -ENOMEM;
 			return true;
 		}
@@ -2982,7 +3016,19 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 		ctx->downgrade = false;
 	ctx->vmas = vma;
 
-	/* Insert lock vma */
+	if (!fine_grained) {
+		struct vm_area_struct *next = prev ? prev->vm_next : mm->mmap;
+
+		/* Take note of any free address space around unmap region */
+		ctx->lock.vm_start = prev ? prev->vm_end : FIRST_USER_ADDRESS;
+		ctx->lock.vm_end = next ?
+			next->vm_start : USER_PGTABLES_CEILING;
+		if (!ctx->locked)
+			mm->mmap_lock.coarse_count = -1;
+		return true;
+	}
+
+	/* Insert lock vma to record the fine grained lock*/
 	if (!mm->mmap) {
 		VM_BUG_ON(prev);
 		rb_parent = NULL;
@@ -3000,10 +3046,14 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
 		rb_link = &rb_parent->rb_left;
 	}
 	__vma_link(mm, &ctx->lock, prev, rb_link, rb_parent);
-	ctx->downgrade = false;	/* Need write lock to remove lock vma */
+	mm->mmap_lock.fine_writers++;
 
-	if (!ctx->locked)
-		mm->mmap_lock.coarse_count = -1;
+	/*
+	 * If we allowed coarse readers, there would be a locking
+	 * conflict when trying to remove the fine grained lock vma.
+	 */
+	ctx->downgrade = false;
+
 	return true;
 }
 
@@ -3035,7 +3085,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	ctx.lock.vm_flags = VM_NONE;
 	ctx.lock.vm_page_prot = vm_get_page_prot(ctx.lock.vm_flags);
 	ctx.lock.vm_pgoff = 0;
-	ctx.lock.vm_ops = &lock_vma_ops;
+	ctx.lock.vm_ops = &mmap_write_lock_ops;
 	ctx.locked = locked;
 	ctx.uf = uf;
 	ctx.downgrade = downgrade;
@@ -3078,29 +3128,39 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	/* Fix up all other VM information */
 	nr_vmas = remove_vma_list(ctx.vmas, &vm_stat_updates, &nr_accounted);
 
-	/* Free any unmapped page tables around the ends of the unmap range */
-	if (grow_lock_vma(&ctx.lock)) {
-		ceiling = ctx.lock.vm_end < TASK_SIZE ?
-			ctx.lock.vm_end : USER_PGTABLES_CEILING;
-		free_boundary_pgtables(mm, start, end,
-				       ctx.lock.vm_start, ceiling);
-	}
+	if (mm->mmap_lock.fine_writers) {
+		mmap_vma_lock(mm);
 
-	/* Remove the lock vma */
-	vma_rb_erase(&ctx.lock, &mm->mm_rb);
-	if (ctx.lock.vm_prev) {
-		ctx.lock.vm_prev->vm_next = ctx.lock.vm_next;
-	} else {
-		mm->mmap = ctx.lock.vm_next;
+		/*
+		 * Free any unmapped page tables around the ends of the
+		 * fine grained lock.
+		 */
+		while (grow_lock_vma(&ctx.lock)) {
+			mmap_vma_unlock(mm);
+			ceiling = ctx.lock.vm_end < TASK_SIZE ?
+				ctx.lock.vm_end : USER_PGTABLES_CEILING;
+			free_boundary_pgtables(mm, start, end,
+					       ctx.lock.vm_start, ceiling);
+			mmap_vma_lock(mm);
+		}
+
+		/* Remove the lock vma */
+		vma_rb_erase(&ctx.lock, &mm->mm_rb);
+		if (ctx.lock.vm_prev) {
+			ctx.lock.vm_prev->vm_next = ctx.lock.vm_next;
+		} else {
+			mm->mmap = ctx.lock.vm_next;
+		}
+		if (ctx.lock.vm_next) {
+			ctx.lock.vm_next->vm_prev = ctx.lock.vm_prev;
+			vma_gap_update(ctx.lock.vm_next);
+		} else {
+			mm->highest_vm_end = ctx.lock.vm_prev ?
+				vm_end_gap(ctx.lock.vm_prev) : 0;
+		}
+		vmacache_invalidate(mm);
+		/* hold mmap_vma_lock() until mmap_vma_f_unlock() below */
 	}
-	if (ctx.lock.vm_next) {
-		ctx.lock.vm_next->vm_prev = ctx.lock.vm_prev;
-		vma_gap_update(ctx.lock.vm_next);
-	} else {
-		mm->highest_vm_end = ctx.lock.vm_prev ?
-			vm_end_gap(ctx.lock.vm_prev) : 0;
-	}
-	vmacache_invalidate(mm);
 
 	/* Update high watermark before we lower total_vm */
 	update_hiwater_vm(mm);
@@ -3113,7 +3173,12 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	mm->map_count -= nr_vmas;
 	validate_mm(mm);
 
-	if (locked) {
+	if (mm->mmap_lock.fine_writers) {
+		VM_BUG_ON_MM(mm->mmap_lock.coarse_count, mm);
+		VM_BUG_ON_MM(mm->mmap_lock.fine_writers <= 0, mm);
+		mm->mmap_lock.fine_writers--;
+		mmap_vma_f_unlock(mm, true);
+	} else if (locked) {
 		return ctx.downgrade ? 1 : 0;
 	} else if (ctx.downgrade) {
 		mmap_read_unlock(mm);
