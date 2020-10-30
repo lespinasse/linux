@@ -2292,6 +2292,7 @@ static const struct vm_operations_struct btrfs_file_vm_ops = {
 	.fault		= filemap_fault,
 	.map_pages	= filemap_map_pages,
 	.page_mkwrite	= btrfs_page_mkwrite,
+	.fine_grained	= true,
 };
 
 static int btrfs_file_mmap(struct file	*filp, struct vm_area_struct *vma)

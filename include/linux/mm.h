@@ -607,6 +607,22 @@ struct vm_operations_struct {
 	 */
 	struct page *(*find_special_page)(struct vm_area_struct *vma,
 					  unsigned long addr);
+
+	/*
+	 * fine_grained indicates that the vm_operations support
+	 * fine grained mm locking.
+	 * - The methods may be called with a fine grained range lock
+	 *   covering a PMD sized region around the fault address;
+	 * - The range lock does not  protect against concurrent access
+	 *   to per-mmmm structures, so an appropriate lock must be used
+	 *   for such cases
+	 *   (such as mm_vma_lock() for accessing the vma rbtree);
+	 * - if dropping mmap_sem, the vmf->range must be used
+	 *   to release the specific locked range only;
+	 * - vmf->vma only holds a copy of the original vma.
+	 *   Any persistent vma updates must first look up the actual vma.
+	 */
+	bool fine_grained;
 };
 
 static inline void vma_init(struct vm_area_struct *vma, struct mm_struct *mm)

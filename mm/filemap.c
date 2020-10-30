@@ -2887,6 +2887,7 @@ const struct vm_operations_struct generic_file_vm_ops = {
 	.fault		= filemap_fault,
 	.map_pages	= filemap_map_pages,
 	.page_mkwrite	= filemap_page_mkwrite,
+	.fine_grained	= true,
 };
 
 /* This is used for a general mmap of a disk file */

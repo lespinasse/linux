@@ -3947,6 +3947,7 @@ static const struct vm_operations_struct shmem_vm_ops = {
 	.set_policy     = shmem_set_policy,
 	.get_policy     = shmem_get_policy,
 #endif
+	.fine_grained	= true,
 };
 
 int shmem_init_fs_context(struct fs_context *fc)
