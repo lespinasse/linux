@@ -40,6 +40,7 @@ struct stack_map_irq_work {
 
 static void do_up_read(struct irq_work *entry)
 {
+#if 0
 	struct stack_map_irq_work *work;
 
 	if (WARN_ON_ONCE(IS_ENABLED(CONFIG_PREEMPT_RT)))
@@ -47,6 +48,7 @@ static void do_up_read(struct irq_work *entry)
 
 	work = container_of(entry, struct stack_map_irq_work, irq_work);
 	mmap_read_unlock_non_owner(work->mm);
+#endif
 }
 
 static DEFINE_PER_CPU(struct stack_map_irq_work, up_read_work);
@@ -153,6 +155,7 @@ free_charge:
 	return ERR_PTR(err);
 }
 
+#if 0
 #define BPF_BUILD_ID 3
 /*
  * Parse build id from the note segment. This logic can be shared between
@@ -286,12 +289,13 @@ out:
 	put_page(page);
 	return ret;
 }
+#endif
 
 static void stack_map_get_build_id_offset(struct bpf_stack_build_id *id_offs,
 					  u64 *ips, u32 trace_nr, bool user)
 {
 	int i;
-	struct vm_area_struct *vma;
+	/* struct vm_area_struct *vma; */
 	bool irq_work_busy = false;
 	struct stack_map_irq_work *work = NULL;
 
@@ -320,9 +324,13 @@ static void stack_map_get_build_id_offset(struct bpf_stack_build_id *id_offs,
 	 *
 	 * Same fallback is used for kernel stack (!user) on a stackmap
 	 * with build_id.
+	 *
+	 * FIXME - currently disabling the build_id lookup feature
+	 * as mm_read_range_unlock() may block, which is not always
+	 * possible to do here.
 	 */
 	if (!user || !current || !current->mm || irq_work_busy ||
-	    !mmap_read_trylock_non_owner(current->mm)) {
+	    true /* !mmap_read_trylock_non_owner(current->mm) */ ) {
 		/* cannot access current->mm, fall back to ips */
 		for (i = 0; i < trace_nr; i++) {
 			id_offs[i].status = BPF_STACK_BUILD_ID_IP;
@@ -332,6 +340,7 @@ static void stack_map_get_build_id_offset(struct bpf_stack_build_id *id_offs,
 		return;
 	}
 
+#if 0
 	for (i = 0; i < trace_nr; i++) {
 		vma = find_vma(current->mm, ips[i]);
 		if (!vma || stack_map_get_build_id(vma, id_offs[i].build_id)) {
@@ -352,6 +361,7 @@ static void stack_map_get_build_id_offset(struct bpf_stack_build_id *id_offs,
 		work->mm = current->mm;
 		irq_work_queue(&work->irq_work);
 	}
+#endif
 }
 
 static struct perf_callchain_entry *
