@@ -476,9 +476,9 @@ static void exit_mm(void)
 	/* more a memory barrier than a real lock */
 	task_lock(current);
 	current->mm = NULL;
-	mmap_read_unlock(mm);
 	enter_lazy_tlb(mm, current);
 	task_unlock(current);
+	mmap_read_unlock(mm);
 	mm_update_next_owner(mm);
 	mmput(mm);
 	if (test_thread_flag(TIF_MEMDIE))

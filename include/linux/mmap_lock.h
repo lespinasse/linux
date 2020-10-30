@@ -33,6 +33,7 @@ static inline bool mmap_write_trylock(struct mm_struct *mm)
 
 static inline void mmap_write_unlock(struct mm_struct *mm)
 {
+	might_sleep();
 	up_write(&mm->mmap_lock);
 }
 
@@ -58,6 +59,7 @@ static inline bool mmap_read_trylock(struct mm_struct *mm)
 
 static inline void mmap_read_unlock(struct mm_struct *mm)
 {
+	might_sleep();
 	up_read(&mm->mmap_lock);
 }
 
