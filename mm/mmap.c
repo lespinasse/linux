@@ -2779,6 +2779,92 @@ int split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
 }
 
 /*
+ * pgtable_boundaries looks for the largest page table mapping addr
+ * that is fully contained within the given floor and ceiling.
+ *
+ * Returns true if such a page table is found; *pstart and *plast are then
+ * set to the fist and last addresses mapped by that page table.
+ */
+static bool pgtable_boundaries(unsigned long addr,
+			       unsigned long floor, unsigned long ceiling,
+			       unsigned long *pstart, unsigned long *plast)
+{
+	unsigned long start, last;
+
+	addr &= PMD_MASK;
+	if (addr < floor || addr + PMD_SIZE - 1 > ceiling - 1)
+		return false;
+	start = addr; last = addr + PMD_SIZE - 1;
+
+	addr &= PUD_MASK;
+	if (addr < floor || addr + PUD_SIZE - 1 > ceiling - 1)
+		goto out;
+	start = addr; last = addr + PUD_SIZE - 1;
+
+	addr &= P4D_MASK;
+	if (addr < floor || addr + P4D_SIZE - 1 > ceiling - 1)
+		goto out;
+	start = addr; last = addr + P4D_SIZE - 1;
+
+	addr &= PGDIR_MASK;
+	if (addr < floor || addr + PGDIR_SIZE - 1 > ceiling - 1)
+		goto out;
+	start = addr; last = addr + PGDIR_SIZE - 1;
+
+out:
+	*pstart = start;
+	*plast = last;
+	return true;
+}
+
+static inline bool grow_lock_vma(struct vm_area_struct *lock)
+{
+	unsigned long floor, ceiling, pg_start, pg_last, addr;
+	bool adjusted = false;
+
+	floor = lock->vm_prev ? lock->vm_prev->vm_end : FIRST_USER_ADDRESS;
+	ceiling = lock->vm_next ?
+		lock->vm_next->vm_start : USER_PGTABLES_CEILING;
+	if (pgtable_boundaries(lock->vm_start, floor, ceiling,
+			       &pg_start, &pg_last)) {
+		addr = max(pg_start, FIRST_USER_ADDRESS);
+		if (addr < lock->vm_start) {
+			lock->vm_start = addr;
+			vma_gap_update(lock);
+			adjusted = true;
+		}
+		if (pg_last >= lock->vm_end - 1)
+			goto adjust_end;
+	}
+	if (pgtable_boundaries(lock->vm_end - 1, floor, ceiling,
+			       &pg_start, &pg_last)) {
+	adjust_end:
+		addr = min(pg_last, TASK_SIZE-1) + 1;
+		if (addr > lock->vm_end) {
+			lock->vm_end = addr;
+			if (lock->vm_next)
+				vma_gap_update(lock->vm_next);
+			else
+				lock->vm_mm->highest_vm_end = addr;
+			adjusted = true;
+		}
+	}
+	return adjusted;
+}
+
+static inline void free_boundary_pgtables(struct mm_struct *mm,
+		unsigned long start, unsigned long end,
+		unsigned long floor, unsigned long ceiling)
+{
+	struct mmu_gather tlb;
+
+	tlb_gather_mmu(&tlb, mm, start, end);
+	free_pgd_range(&tlb, start, start, floor, end);
+	free_pgd_range(&tlb, end, end, floor, ceiling);
+	tlb_finish_mmu(&tlb, start, end);
+}
+
+/*
  * Having a close hook prevents vma merging regardless of flags.
  */
 static void mmap_write_lock_close(struct vm_area_struct *vma)
@@ -2904,7 +2990,7 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	struct mm_vm_stat vm_stat_updates = {};
 	unsigned long nr_accounted = 0, nr_unlocked = 0;
 	int nr_vmas;
-	unsigned long end;
+	unsigned long end, ceiling;
 	int error;
 
 	if ((offset_in_page(start)) || start > TASK_SIZE || len > TASK_SIZE-start)
@@ -2946,14 +3032,20 @@ int __do_munmap(struct mm_struct *mm, unsigned long start, size_t len,
 	if (ctx.downgrade)
 		mmap_write_downgrade(mm);
 
-	unmap_region(mm, ctx.vmas, start, end,
-		     ctx.lock.vm_prev ?
-			ctx.lock.vm_prev->vm_end : FIRST_USER_ADDRESS,
-		     ctx.lock.vm_next ?
-			ctx.lock.vm_next->vm_start : USER_PGTABLES_CEILING);
+	ceiling = ctx.lock.vm_end < TASK_SIZE ?
+		ctx.lock.vm_end : USER_PGTABLES_CEILING;
+	unmap_region(mm, ctx.vmas, start, end, ctx.lock.vm_start, ceiling);
 
 	/* Fix up all other VM information */
 	nr_vmas = remove_vma_list(ctx.vmas, &vm_stat_updates, &nr_accounted);
+
+	/* Free any unmapped page tables around the ends of the unmap range */
+	if (grow_lock_vma(&ctx.lock)) {
+		ceiling = ctx.lock.vm_end < TASK_SIZE ?
+			ctx.lock.vm_end : USER_PGTABLES_CEILING;
+		free_boundary_pgtables(mm, start, end,
+				       ctx.lock.vm_start, ceiling);
+	}
 
 	/* Remove the lock vma */
 	vma_rb_erase(&ctx.lock, &mm->mm_rb);
