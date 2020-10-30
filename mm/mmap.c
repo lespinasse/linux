@@ -3018,7 +3018,8 @@ static bool __prepare_munmap(struct mm_struct *mm, struct mmap_lock_waiter *w)
                 while (tmp && tmp->vm_start < end) {
 			if (tmp->vm_ops == &mmap_write_lock_ops)
 				return false;
-			if (!vma_is_anonymous(tmp)) {
+			if (!vma_is_anonymous(tmp) &&
+			    !tmp->vm_ops->fine_grained) {
 				if (mm->mmap_lock.fine_writers ||
 				    mm->mmap_lock.fine_readers.rb_node)
 					return false;
