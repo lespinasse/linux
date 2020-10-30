@@ -450,11 +450,14 @@ static void vma_gap_update(struct vm_area_struct *vma)
 {
 	/*
 	 * The mmap_lock must be held for write,
+	 * OR mmap_vma_lock must be held and mmap_lock must be free,
 	 * OR it must be held for read and page_table_lock must be held
 	 * (as in the expand_upwards or expand_downward cases)
 	 */
 	WARN_ON(debug_locks &&
 		!lockdep_is_held_type(&vma->vm_mm->mmap_lock, 0) &&
+		(!lockdep_is_held_type(&vma->vm_mm->mmap_lock.mutex, 0) ||
+		 vma->vm_mm->mmap_lock.coarse_count) &&
 		(!lockdep_is_held_type(&vma->vm_mm->mmap_lock, 1) ||
 		 !lockdep_is_held_type(&vma->vm_mm->page_table_lock, 0)));
 
@@ -468,7 +471,14 @@ static void vma_gap_update(struct vm_area_struct *vma)
 static inline void vma_rb_insert(struct vm_area_struct *vma,
 				 struct rb_root *root)
 {
-	mmap_assert_write_locked(vma->vm_mm);
+	/*
+	 * The mmap_lock must be held for write,
+	 * OR mmap_vma_lock must be held and mmap_lock must be free.
+	 */
+	WARN_ON(debug_locks &&
+		!lockdep_is_held_type(&vma->vm_mm->mmap_lock, 0) &&
+		(!lockdep_is_held_type(&vma->vm_mm->mmap_lock.mutex, 0) ||
+		 vma->vm_mm->mmap_lock.coarse_count));
 
 	/* All rb_subtree_gap values must be consistent prior to insertion */
 	validate_mm_rb(root, NULL);
@@ -478,7 +488,14 @@ static inline void vma_rb_insert(struct vm_area_struct *vma,
 
 static void __vma_rb_erase(struct vm_area_struct *vma, struct rb_root *root)
 {
-	mmap_assert_write_locked(vma->vm_mm);
+	/*
+	 * The mmap_lock must be held for write,
+	 * OR mmap_vma_lock must be held and mmap_lock must be free.
+	 */
+	WARN_ON(debug_locks &&
+		!lockdep_is_held_type(&vma->vm_mm->mmap_lock, 0) &&
+		(!lockdep_is_held_type(&vma->vm_mm->mmap_lock.mutex, 0) ||
+		 vma->vm_mm->mmap_lock.coarse_count));
 
 	/*
 	 * Note rb_erase_augmented is a fairly large inline function,
