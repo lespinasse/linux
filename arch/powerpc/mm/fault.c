@@ -68,52 +68,11 @@ static noinline int bad_area_nosemaphore(struct pt_regs *regs, unsigned long add
 	return __bad_area_nosemaphore(regs, address, SEGV_MAPERR);
 }
 
-static int __bad_area(struct pt_regs *regs, unsigned long address, int si_code)
-{
-	struct mm_struct *mm = current->mm;
-
-	/*
-	 * Something tried to access memory that isn't in our memory map..
-	 * Fix it, but check if it's kernel or user first..
-	 */
-	mmap_read_unlock(mm);
-
-	return __bad_area_nosemaphore(regs, address, si_code);
-}
-
-static noinline int bad_area(struct pt_regs *regs, unsigned long address)
-{
-	return __bad_area(regs, address, SEGV_MAPERR);
-}
 
 #ifdef CONFIG_PPC_MEM_KEYS
 static noinline int bad_access_pkey(struct pt_regs *regs, unsigned long address,
-				    struct vm_area_struct *vma)
+				    int pkey)
 {
-	struct mm_struct *mm = current->mm;
-	int pkey;
-
-	/*
-	 * We don't try to fetch the pkey from page table because reading
-	 * page table without locking doesn't guarantee stable pte value.
-	 * Hence the pkey value that we return to userspace can be different
-	 * from the pkey that actually caused access error.
-	 *
-	 * It does *not* guarantee that the VMA we find here
-	 * was the one that we faulted on.
-	 *
-	 * 1. T1   : mprotect_key(foo, PAGE_SIZE, pkey=4);
-	 * 2. T1   : set AMR to deny access to pkey=4, touches, page
-	 * 3. T1   : faults...
-	 * 4.    T2: mprotect_key(foo, PAGE_SIZE, pkey=5);
-	 * 5. T1   : enters fault handler, takes mmap_lock, etc...
-	 * 6. T1   : reaches here, sees vma_pkey(vma)=5, when we really
-	 *	     faulted on a pte with its pkey=4.
-	 */
-	pkey = vma_pkey(vma);
-
-	mmap_read_unlock(mm);
-
 	/*
 	 * If we are in kernel mode, bail out with a SEGV, this will
 	 * be caught by the assembly which will restore the non-volatile
@@ -130,7 +89,7 @@ static noinline int bad_access_pkey(struct pt_regs *regs, unsigned long address,
 
 static noinline int bad_access(struct pt_regs *regs, unsigned long address)
 {
-	return __bad_area(regs, address, SEGV_ACCERR);
+	return __bad_area_nosemaphore(regs, address, SEGV_ACCERR);
 }
 
 static int do_sigbus(struct pt_regs *regs, unsigned long address,
@@ -377,6 +336,121 @@ static void sanity_check_fault(bool is_write, bool is_user,
 #endif
 #endif
 
+enum ppc_pf_error {
+	PPC_PF_NO_ERROR = 0,
+	PPC_PF_BAD_AREA,
+	PPC_PF_BAD_ACCESS,
+	PPC_PF_BAD_KEY
+};
+
+struct pf_lock_ctx {
+	struct mmap_lock_waiter waiter;
+
+	/* Inputs */
+	unsigned long address;
+	unsigned long error_code;
+	unsigned int flags;
+
+	/* Outputs */
+	enum ppc_pf_error error;
+	struct vm_area_struct *vma;
+	struct mmap_read_range *range;
+	vm_fault_t fault;
+#ifdef CONFIG_PPC_MEM_KEYS
+	int pkey;
+#endif
+
+	/* Allocs */
+	struct vm_area_struct pvma;
+	struct mmap_read_range fine_range;
+
+};
+
+static bool pf_mmap_lock(struct mm_struct *mm, struct mmap_lock_waiter *w)
+{
+	struct pf_lock_ctx *ctx = container_of(w, struct pf_lock_ctx, waiter);
+	struct vm_area_struct *vma;
+	unsigned long address = ctx->address;
+
+	if (mm->mmap_lock.coarse_count < 0)
+		return false;
+
+	ctx->error = PPC_PF_BAD_AREA;
+	vma = find_vma(mm, address);
+	if (unlikely(!vma))
+		return true;
+
+	if (unlikely(vma->vm_start > address)) {
+		if (unlikely(!(vma->vm_flags & VM_GROWSDOWN)))
+			return true;
+
+		if (unlikely(expand_stack(vma, address)))
+			return true;
+	}
+
+	ctx->error = PPC_PF_NO_ERROR;
+	if (vma->vm_ops == &mmap_write_lock_ops)
+		return false;
+
+
+#ifdef CONFIG_PPC_MEM_KEYS
+	if (unlikely(access_pkey_error(ctx->flags & FAULT_FLAG_WRITE,
+				       ctx->flags & FAULT_FLAG_INSTRUCTION,
+				       (ctx->error_code & DSISR_KEYFAULT),
+				       vma))) {
+		/*
+		 * We don't try to fetch the pkey from page table because
+		 * reading page table without locking doesn't guarantee stable
+		 * pte value.  Hence the pkey value that we return to userspace
+		 * can be different from the pkey that actually caused access
+		 * error.
+		 *
+		 * It does *not* guarantee that the VMA we find here
+		 * was the one that we faulted on.
+		 *
+		 * 1. T1   : mprotect_key(foo, PAGE_SIZE, pkey=4);
+		 * 2. T1   : set AMR to deny access to pkey=4, touches, page
+		 * 3. T1   : faults...
+		 * 4.    T2: mprotect_key(foo, PAGE_SIZE, pkey=5);
+		 * 5. T1   : enters fault handler, takes mmap_lock, etc...
+		 * 6. T1   : reaches here, sees vma_pkey(vma)=5, when we really
+		 *	     faulted on a pte with its pkey=4.
+		 */
+		ctx->pkey = vma_pkey(vma);
+		ctx->error = PPC_PF_BAD_KEY;
+		return true;
+	}
+#endif /* CONFIG_PPC_MEM_KEYS */
+
+	if (unlikely(access_error(ctx->flags & FAULT_FLAG_WRITE,
+				  ctx->flags & FAULT_FLAG_INSTRUCTION,
+				  vma))) {
+		ctx->error = PPC_PF_BAD_ACCESS;
+		return true;
+	}
+
+	/*
+	 * Allocate anon_vma if needed.
+	 * This needs to operate on the vma of record.
+	 */
+	ctx->fault = prepare_mm_fault(vma, ctx->flags);
+
+	/* Copy vma attributes into pseudo-vma */
+	ctx->vma = &ctx->pvma;
+	ctx->pvma = *vma;
+
+	/* Acquire fine grained lock on the intersection of vma and pmd */
+	ctx->range = &ctx->fine_range;
+	ctx->fine_range.start = address & PMD_MASK;
+	ctx->fine_range.end = ctx->fine_range.start + PMD_SIZE;
+	if (vma->vm_start > ctx->fine_range.start)
+		ctx->fine_range.start = vma->vm_start;
+	if (vma->vm_end < ctx->fine_range.end)
+		ctx->fine_range.end = vma->vm_end;
+	mmap_insert_read_range(mm, &ctx->fine_range);
+	return true;
+}
+
 /*
  * For 600- and 800-family processors, the error_code parameter is DSISR
  * for a data fault, SRR1 for an instruction fault. For 400-family processors
@@ -393,13 +467,13 @@ static void sanity_check_fault(bool is_write, bool is_user,
 static int __do_page_fault(struct pt_regs *regs, unsigned long address,
 			   unsigned long error_code)
 {
-	struct vm_area_struct * vma;
 	struct mm_struct *mm = current->mm;
+	struct pf_lock_ctx ctx;
 	unsigned int flags = FAULT_FLAG_DEFAULT;
  	int is_exec = TRAP(regs) == 0x400;
 	int is_user = user_mode(regs);
 	int is_write = page_fault_is_write(error_code);
-	vm_fault_t fault, major = 0;
+	vm_fault_t major = 0;
 	bool kprobe_fault = kprobe_page_fault(regs, 11);
 
 	if (unlikely(debugger_fault_handler(regs) || kprobe_fault))
@@ -470,69 +544,67 @@ static int __do_page_fault(struct pt_regs *regs, unsigned long address,
 	 * source.  If this is invalid we can skip the address space check,
 	 * thus avoiding the deadlock.
 	 */
-	if (unlikely(!mmap_read_trylock(mm))) {
+
+	ctx.address = address;
+	ctx.error_code = error_code;
+	ctx.flags = flags;
+
+	might_sleep();
+	if (!mmap_read_f_trylock(mm, &ctx.waiter, pf_mmap_lock)) {
 		if (!is_user && !search_exception_tables(regs->nip))
 			return bad_area_nosemaphore(regs, address);
 
 retry:
-		mmap_read_lock(mm);
-	} else {
-		/*
-		 * The above down_read_trylock() might have succeeded in
-		 * which case we'll have missed the might_sleep() from
-		 * down_read():
-		 */
-		might_sleep();
+		ctx.flags = flags;
+		mmap_read_f_lock(mm, &ctx.waiter, pf_mmap_lock);
 	}
 
-	vma = find_vma(mm, address);
-	if (unlikely(!vma))
-		return bad_area(regs, address);
-
-	if (unlikely(vma->vm_start > address)) {
-		if (unlikely(!(vma->vm_flags & VM_GROWSDOWN)))
-			return bad_area(regs, address);
-
-		if (unlikely(expand_stack(vma, address)))
-			return bad_area(regs, address);
-	}
-
-#ifdef CONFIG_PPC_MEM_KEYS
-	if (unlikely(access_pkey_error(is_write, is_exec,
-				       (error_code & DSISR_KEYFAULT), vma)))
-		return bad_access_pkey(regs, address, vma);
-#endif /* CONFIG_PPC_MEM_KEYS */
-
-	if (unlikely(access_error(is_write, is_exec, vma)))
+	switch(ctx.error) {
+	case PPC_PF_NO_ERROR:
+		break;
+	case PPC_PF_BAD_AREA:
+		return bad_area_nosemaphore(regs, address);
+	case PPC_PF_BAD_ACCESS:
 		return bad_access(regs, address);
+#ifdef CONFIG_PPC_MEM_KEYS
+	case PPC_PF_BAD_KEY:
+		return bad_access_pkey(regs, address, ctx.pkey);
+#endif /* CONFIG_PPC_MEM_KEYS */
+	default:
+		pr_err_ratelimited("Bad page fault error code %d\n", ctx.error);
+		return bad_area_nosemaphore(regs, address);
+	}
+
 
 	/*
 	 * If for any reason at all we couldn't handle the fault,
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	fault = handle_mm_fault(vma, address, flags, regs);
+	if (!ctx.fault)
+		ctx.fault = handle_mm_fault_range(ctx.vma, address, flags, regs,
+						  ctx.range);
 
-	major |= fault & VM_FAULT_MAJOR;
+	major |= ctx.fault & VM_FAULT_MAJOR;
 
-	if (fault_signal_pending(fault, regs))
+	if (fault_signal_pending(ctx.fault, regs))
 		return user_mode(regs) ? 0 : SIGBUS;
 
 	/*
 	 * Handle the retry right now, the mmap_lock has been released in that
 	 * case.
 	 */
-	if (unlikely(fault & VM_FAULT_RETRY)) {
+	if (unlikely(ctx.fault & VM_FAULT_RETRY)) {
 		if (flags & FAULT_FLAG_ALLOW_RETRY) {
 			flags |= FAULT_FLAG_TRIED;
 			goto retry;
 		}
 	}
 
-	mmap_read_unlock(current->mm);
+	mmap_read_range_unlock(mm, ctx.range);
 
-	if (unlikely(fault & VM_FAULT_ERROR))
-		return mm_fault_error(regs, address, fault);
+	if (unlikely(ctx.fault & VM_FAULT_ERROR))
+		return mm_fault_error(regs, address, ctx.fault);
 
 	/*
 	 * Major/minor page fault accounting.
