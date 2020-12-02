@@ -1604,7 +1604,9 @@ unsigned long do_mmap(struct file *file, unsigned long addr,
 
 	ret = -EAGAIN;
 
-	if (!locked && !file && !(flags & MAP_FIXED)) {
+	if (!locked &&
+	    (!file || file->f_op->mmap_fine_grained) &&
+	    !(flags & MAP_FIXED)) {
 		struct mmap_lock_waiter w;
 		if (mmap_write_f_lock_killable(mm, &w, __fine_writer))
 			return -EINTR;

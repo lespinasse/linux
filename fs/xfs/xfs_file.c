@@ -1331,6 +1331,7 @@ const struct file_operations xfs_file_operations = {
 #endif
 	.mmap		= xfs_file_mmap,
 	.mmap_supported_flags = MAP_SYNC,
+	.mmap_fine_grained = true,
 	.open		= xfs_file_open,
 	.release	= xfs_file_release,
 	.fsync		= xfs_file_fsync,

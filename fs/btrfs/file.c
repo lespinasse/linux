@@ -3549,6 +3549,7 @@ const struct file_operations btrfs_file_operations = {
 	.write_iter	= btrfs_file_write_iter,
 	.splice_write	= iter_file_splice_write,
 	.mmap		= btrfs_file_mmap,
+	.mmap_fine_grained = true,
 	.open		= btrfs_file_open,
 	.release	= btrfs_release_file,
 	.fsync		= btrfs_sync_file,

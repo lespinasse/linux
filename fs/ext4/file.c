@@ -898,6 +898,7 @@ const struct file_operations ext4_file_operations = {
 #endif
 	.mmap		= ext4_file_mmap,
 	.mmap_supported_flags = MAP_SYNC,
+	.mmap_fine_grained = true,
 	.open		= ext4_file_open,
 	.release	= ext4_release_file,
 	.fsync		= ext4_sync_file,
