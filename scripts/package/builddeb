@@ -50,7 +50,7 @@ create_package() {
 
 	# Create the package
 	dpkg-gencontrol -p$pname -P"$pdir"
-	dpkg-deb $dpkg_deb_opts ${KDEB_COMPRESS:+-Z$KDEB_COMPRESS} --build "$pdir" ..
+	dpkg-deb $dpkg_deb_opts ${KDEB_COMPRESS:+-Z$KDEB_COMPRESS} --build "$pdir" "${UPLOAD_DIR:-..}"
 }
 
 deploy_kernel_headers () {
@@ -208,7 +208,7 @@ EOF
 	chmod 755 "$tmpdir/DEBIAN/$script"
 done
 
-if [ "$ARCH" != "um" ]; then
+if [ "$ARCH" != "um" -a -z "$NO_HEADER_PACKAGES" ]; then
 	if is_enabled CONFIG_MODULES; then
 		deploy_kernel_headers debian/linux-headers
 		create_package linux-headers-$version debian/linux-headers
