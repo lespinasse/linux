@@ -4333,42 +4333,6 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 {
 	pte_t entry;
 
-	if (unlikely(pmd_none(*vmf->pmd))) {
-		/*
-		 * Leave __pte_alloc() until later: because vm_ops->fault may
-		 * want to allocate huge page, and if we expose page table
-		 * for an instant, it will be difficult to retract from
-		 * concurrent faults and from rmap lookups.
-		 */
-		vmf->pte = NULL;
-	} else {
-		/* See comment in pte_alloc_one_map() */
-		if (pmd_devmap_trans_unstable(vmf->pmd))
-			return 0;
-		/*
-		 * A regular pmd is established and it can't morph into a huge
-		 * pmd from under us anymore at this point because we hold the
-		 * mmap_lock read mode and khugepaged takes it in write mode.
-		 * So now it's safe to run pte_offset_map().
-		 */
-		vmf->pte = pte_offset_map(vmf->pmd, vmf->address);
-		vmf->orig_pte = *vmf->pte;
-
-		/*
-		 * some architectures can have larger ptes than wordsize,
-		 * e.g.ppc44x-defconfig has CONFIG_PTE_64BIT=y and
-		 * CONFIG_32BIT=y, so READ_ONCE cannot guarantee atomic
-		 * accesses.  The code below just needs a consistent view
-		 * for the ifs and we later double check anyway with the
-		 * ptl lock held. So here a barrier will do.
-		 */
-		barrier();
-		if (pte_none(vmf->orig_pte)) {
-			pte_unmap(vmf->pte);
-			vmf->pte = NULL;
-		}
-	}
-
 	if (!vmf->pte) {
 		if (vma_is_anonymous(vmf->vma))
 			return do_anonymous_page(vmf);
@@ -4505,6 +4469,42 @@ retry_pud:
 				huge_pmd_set_accessed(&vmf, orig_pmd);
 				return 0;
 			}
+		}
+	}
+
+	if (unlikely(pmd_none(*vmf.pmd))) {
+		/*
+		 * Leave __pte_alloc() until later: because vm_ops->fault may
+		 * want to allocate huge page, and if we expose page table
+		 * for an instant, it will be difficult to retract from
+		 * concurrent faults and from rmap lookups.
+		 */
+		vmf.pte = NULL;
+	} else {
+		/* See comment in pte_alloc_one_map() */
+		if (pmd_devmap_trans_unstable(vmf.pmd))
+			return 0;
+		/*
+		 * A regular pmd is established and it can't morph into a huge
+		 * pmd from under us anymore at this point because we hold the
+		 * mmap_lock read mode and khugepaged takes it in write mode.
+		 * So now it's safe to run pte_offset_map().
+		 */
+		vmf.pte = pte_offset_map(vmf.pmd, vmf.address);
+		vmf.orig_pte = *vmf.pte;
+
+		/*
+		 * some architectures can have larger ptes than wordsize,
+		 * e.g.ppc44x-defconfig has CONFIG_PTE_64BIT=y and
+		 * CONFIG_32BIT=y, so READ_ONCE cannot guarantee atomic
+		 * accesses.  The code below just needs a consistent view
+		 * for the ifs and we later double check anyway with the
+		 * ptl lock held. So here a barrier will do.
+		 */
+		barrier();
+		if (pte_none(vmf.orig_pte)) {
+			pte_unmap(vmf.pte);
+			vmf.pte = NULL;
 		}
 	}
 
