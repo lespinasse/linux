@@ -3740,7 +3740,8 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 	 *				unlock_page(B)
 	 *				# flush A, B to clear the writeback
 	 */
-	if (pmd_none(*vmf->pmd) && !vmf->prealloc_pte) {
+	if (!(vmf->flags & FAULT_FLAG_SPECULATIVE) &&
+	    pmd_none(*vmf->pmd) && !vmf->prealloc_pte) {
 		vmf->prealloc_pte = pte_alloc_one(vma->vm_mm);
 		if (!vmf->prealloc_pte)
 			return VM_FAULT_OOM;
@@ -3802,6 +3803,8 @@ static int pmd_devmap_trans_unstable(pmd_t *pmd)
 static vm_fault_t pte_alloc_one_map(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
+
+	VM_BUG_ON(vmf->flags & FAULT_FLAG_SPECULATIVE);
 
 	if (!pmd_none(*vmf->pmd))
 		goto map_pte;
@@ -3949,6 +3952,12 @@ vm_fault_t alloc_set_pte(struct vm_fault *vmf, struct page *page)
 	pte_t entry;
 	vm_fault_t ret;
 
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+		if (vmf->pte || pte_map_lock(vmf))
+			goto pte_mapped;
+		return VM_FAULT_RETRY;
+	}
+
 	if (pmd_none(*vmf->pmd) && PageTransCompound(page)) {
 		ret = do_set_pmd(vmf, page);
 		if (ret != VM_FAULT_FALLBACK)
@@ -3961,6 +3970,7 @@ vm_fault_t alloc_set_pte(struct vm_fault *vmf, struct page *page)
 			return ret;
 	}
 
+pte_mapped:
 	/* Re-check under ptl */
 	if (unlikely(!pte_none(*vmf->pte))) {
 		update_mmu_tlb(vma, vmf->address, vmf->pte);
@@ -4115,7 +4125,7 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 	end_pgoff = min3(end_pgoff, vma_pages(vmf->vma) + vmf->vma->vm_pgoff - 1,
 			start_pgoff + nr_pages - 1);
 
-	if (pmd_none(*vmf->pmd)) {
+	if (!(vmf->flags & FAULT_FLAG_SPECULATIVE) && pmd_none(*vmf->pmd)) {
 		vmf->prealloc_pte = pte_alloc_one(vmf->vma->vm_mm);
 		if (!vmf->prealloc_pte)
 			goto out;
