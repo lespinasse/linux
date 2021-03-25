@@ -2969,7 +2969,7 @@ void filemap_map_pages(struct vm_fault *vmf,
 	struct page *head, *page;
 	unsigned int mmap_miss = READ_ONCE(file->f_ra.mmap_miss);
 
-	rcu_read_lock();
+	/* filemap_map_pages() is called within an rcu read lock already. */
 	xas_for_each(&xas, head, end_pgoff) {
 		if (xas_retry(&xas, head))
 			continue;
@@ -3024,7 +3024,6 @@ next:
 		if (pmd_trans_huge(*vmf->pmd))
 			break;
 	}
-	rcu_read_unlock();
 	WRITE_ONCE(file->f_ra.mmap_miss, mmap_miss);
 }
 EXPORT_SYMBOL(filemap_map_pages);

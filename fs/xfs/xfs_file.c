@@ -1327,7 +1327,8 @@ xfs_filemap_map_pages(
 {
 	struct inode		*inode = file_inode(vmf->vma->vm_file);
 
-	xfs_ilock(XFS_I(inode), XFS_MMAPLOCK_SHARED);
+	if (!xfs_ilock_nowait(XFS_I(inode), XFS_MMAPLOCK_SHARED))
+		return;
 	filemap_map_pages(vmf, start_pgoff, end_pgoff);
 	xfs_iunlock(XFS_I(inode), XFS_MMAPLOCK_SHARED);
 }
