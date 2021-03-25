@@ -1321,6 +1321,10 @@ void do_user_addr_fault(struct pt_regs *regs,
 	}
 #endif
 
+	/* Only try spf for multithreaded user space faults. */
+	if (!(flags & FAULT_FLAG_USER) || atomic_read(&mm->mm_users) == 1)
+		goto no_spf;
+
 	count_vm_event(SPF_ATTEMPT);
 	seq = mmap_seq_read_start(mm);
 	if (seq & 1)
@@ -1354,6 +1358,7 @@ void do_user_addr_fault(struct pt_regs *regs,
 
 spf_abort:
 	count_vm_event(SPF_ABORT);
+no_spf:
 
 	/*
 	 * Kernel-mode access to the user address space should only occur
