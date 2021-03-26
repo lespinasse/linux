@@ -371,8 +371,6 @@ struct vm_area_struct *vm_area_dup(struct vm_area_struct *orig)
 
 static inline void ____vm_area_free(struct vm_area_struct *vma)
 {
-	if (vma->vm_file)
-		fput(vma->vm_file);
 	kmem_cache_free(vm_area_cachep, vma);
 }
 
@@ -635,7 +633,6 @@ fail_uprobe_end:
 fail_nomem_anon_vma_fork:
 	mpol_put(vma_policy(tmp));
 fail_nomem_policy:
-	tmp->vm_file = NULL;	/* prevents fput within vm_area_free() */
 	vm_area_free(tmp);
 fail_nomem:
 	retval = -ENOMEM;
