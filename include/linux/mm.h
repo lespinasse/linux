@@ -701,12 +701,14 @@ static inline bool vma_can_speculate(struct vm_area_struct *vma,
 {
 	if (vma_is_anonymous(vma))
 		return true;
+#if 0
 	if (!vma->vm_ops->speculative)
 		return false;
 	if (!(flags & FAULT_FLAG_WRITE))
 		return true;
 	if (!(vma->vm_flags & VM_SHARED))
 		return true;
+#endif
 	return false;
 }
 
