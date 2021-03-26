@@ -3365,8 +3365,11 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	vm_fault_t ret = 0;
 	void *shadow = NULL;
 
-	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
 		count_vm_event(SPF_ATTEMPT_SWAP);
+		pte_unmap(vmf->pte);
+		return VM_FAULT_RETRY;
+	}
 
 #if defined(CONFIG_SMP) || defined(CONFIG_PREEMPTION)
 	if (sizeof(pte_t) > sizeof(unsigned long)) {
