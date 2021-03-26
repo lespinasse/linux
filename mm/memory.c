@@ -2579,7 +2579,7 @@ static bool __pte_map_lock(struct vm_fault *vmf)
 	}
 
 	local_irq_disable();
-	if (!mmap_seq_read_check(vmf->vma->vm_mm, vmf->seq))
+	if (!mmap_seq_read_check(vmf->vma->vm_mm, vmf->seq, SPF_ABORT_PTE_MAP_LOCK_SEQ1))
 		goto fail;
 	/*
 	 * The mmap sequence count check guarantees that the page
@@ -2593,8 +2593,10 @@ static bool __pte_map_lock(struct vm_fault *vmf)
 	 * is not a huge collapse operation in progress in our back.
 	 */
 	pmdval = READ_ONCE(*vmf->pmd);
-	if (!pmd_same(pmdval, vmf->orig_pmd))
+	if (!pmd_same(pmdval, vmf->orig_pmd)) {
+		count_vm_event(SPF_ABORT_PTE_MAP_LOCK_PMD);
 		goto fail;
+	}
 #endif
 	ptl = pte_lockptr(vmf->vma->vm_mm, vmf->pmd);
 	if (!pte)
@@ -2611,9 +2613,11 @@ static bool __pte_map_lock(struct vm_fault *vmf)
 	 * We also don't want to retry until spin_trylock() succeeds,
 	 * because of the starvation potential against a stream of lockers.
 	 */
-	if (unlikely(!spin_trylock(ptl)))
+	if (unlikely(!spin_trylock(ptl))) {
+		count_vm_event(SPF_ABORT_PTE_MAP_LOCK_PTL);
 		goto fail;
-	if (!mmap_seq_read_check(vmf->vma->vm_mm, vmf->seq))
+	}
+	if (!mmap_seq_read_check(vmf->vma->vm_mm, vmf->seq, SPF_ABORT_PTE_MAP_LOCK_SEQ2))
 		goto unlock_fail;
 	local_irq_enable();
 	vmf->pte = pte;
@@ -2913,6 +2917,7 @@ static vm_fault_t wp_page_copy(struct vm_fault *vmf)
 
 	if (unlikely(!vma->anon_vma)) {
 		if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+			count_vm_event(SPF_ABORT_ANON_VMA);
 			ret = VM_FAULT_RETRY;
 			goto out;
 		}
@@ -3176,10 +3181,15 @@ static vm_fault_t do_wp_page(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		count_vm_event(SPF_ATTEMPT_WP);
+
 	if (userfaultfd_pte_wp(vma, *vmf->pte)) {
 		pte_unmap_unlock(vmf->pte, vmf->ptl);
-		if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+			count_vm_event(SPF_ABORT_USERFAULTFD);
 			return VM_FAULT_RETRY;
+		}
 		return handle_userfault(vmf, VM_UFFD_WP);
 	}
 
@@ -3355,6 +3365,9 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	vm_fault_t ret = 0;
 	void *shadow = NULL;
 
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		count_vm_event(SPF_ATTEMPT_SWAP);
+
 #if defined(CONFIG_SMP) || defined(CONFIG_PREEMPTION)
 	if (sizeof(pte_t) > sizeof(unsigned long)) {
 		/*
@@ -3381,6 +3394,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 	entry = pte_to_swp_entry(vmf->orig_pte);
 	if (unlikely(non_swap_entry(entry))) {
 		if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+			count_vm_event(SPF_ABORT_NON_SWAP_ENTRY);
 			ret = VM_FAULT_RETRY;
 		} else if (is_migration_entry(entry)) {
 			migration_entry_wait(vma->vm_mm, vmf->pmd,
@@ -3407,6 +3421,7 @@ vm_fault_t do_swap_page(struct vm_fault *vmf)
 
 		if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
 			delayacct_clear_flag(DELAYACCT_PF_SWAPIN);
+			count_vm_event(SPF_ABORT_SWAP_NOPAGE);
 			return VM_FAULT_RETRY;
 		}
 
@@ -3613,6 +3628,9 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	vm_fault_t ret = 0;
 	pte_t entry;
 
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		count_vm_event(SPF_ATTEMPT_ANON);
+
 	/* File mapping without ->vm_ops ? */
 	if (vma->vm_flags & VM_SHARED)
 		return VM_FAULT_SIGBUS;
@@ -3642,8 +3660,10 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 	} else {
 		/* Allocate our own private page. */
 		if (unlikely(!vma->anon_vma)) {
-			if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+			if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+				count_vm_event(SPF_ABORT_ANON_VMA);
 				return VM_FAULT_RETRY;
+			}
 			if (__anon_vma_prepare(vma))
 				goto oom;
 		}
@@ -3686,8 +3706,10 @@ static vm_fault_t do_anonymous_page(struct vm_fault *vmf)
 		pte_unmap_unlock(vmf->pte, vmf->ptl);
 		if (page)
 			put_page(page);
-		if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+			count_vm_event(SPF_ABORT_USERFAULTFD);
 			return VM_FAULT_RETRY;
+		}
 		return handle_userfault(vmf, VM_UFFD_MISSING);
 	}
 
@@ -3751,7 +3773,8 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 	if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
 		rcu_read_lock();
-		if (!mmap_seq_read_check(vmf->vma->vm_mm, vmf->seq)) {
+		if (!mmap_seq_read_check(vmf->vma->vm_mm, vmf->seq,
+					 SPF_ABORT_FAULT)) {
 			ret = VM_FAULT_RETRY;
 		} else {
 			/*
@@ -4207,8 +4230,10 @@ static vm_fault_t do_cow_fault(struct vm_fault *vmf)
 	vm_fault_t ret;
 
 	if (unlikely(!vma->anon_vma)) {
-		if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+			count_vm_event(SPF_ABORT_ANON_VMA);
 			return VM_FAULT_RETRY;
+		}
 		if (__anon_vma_prepare(vma))
 			return VM_FAULT_OOM;
 	}
@@ -4294,6 +4319,9 @@ static vm_fault_t do_fault(struct vm_fault *vmf)
 	struct mm_struct *vm_mm = vma->vm_mm;
 	vm_fault_t ret;
 
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		count_vm_event(SPF_ATTEMPT_FILE);
+
 	/*
 	 * The VMA was not fully populated on mmap() or missing VM_DONTEXPAND
 	 */
@@ -4366,6 +4394,9 @@ static vm_fault_t do_numa_page(struct vm_fault *vmf)
 	pte_t pte, old_pte;
 	bool was_writable = pte_savedwrite(vmf->orig_pte);
 	int flags = 0;
+
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		count_vm_event(SPF_ATTEMPT_NUMA);
 
 	/*
 	 * The "pte" at this point cannot be used safely without
@@ -4539,6 +4570,9 @@ static vm_fault_t handle_pte_fault(struct vm_fault *vmf)
 	if (pte_protnone(vmf->orig_pte) && vma_is_accessible(vmf->vma))
 		return do_numa_page(vmf);
 
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		count_vm_event(SPF_ATTEMPT_PTE);
+
 	if (!pte_spinlock(vmf))
 		return VM_FAULT_RETRY;
 	entry = vmf->orig_pte;
@@ -4600,6 +4634,7 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 		pgd_t pgdval;
 		p4d_t p4dval;
 		pud_t pudval;
+		enum vm_event_item fail_event = SPF_ABORT_PUD;
 
 		vmf.seq = seq;
 
@@ -4616,6 +4651,7 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 
 		vmf.pud = pud_offset(p4d, address);
 		pudval = READ_ONCE(*vmf.pud);
+		fail_event = SPF_ABORT_PMD;
 		if (pud_none(pudval) || unlikely(pud_bad(pudval)) ||
 		    unlikely(pud_trans_huge(pudval)) ||
 		    unlikely(pud_devmap(pudval)))
@@ -4664,6 +4700,7 @@ static vm_fault_t __handle_mm_fault(struct vm_area_struct *vma,
 
 	spf_fail:
 		local_irq_enable();
+		count_vm_event(fail_event);
 		return VM_FAULT_RETRY;
 	}
 #endif	/* CONFIG_SPECULATIVE_PAGE_FAULT */

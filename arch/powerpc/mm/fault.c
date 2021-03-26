@@ -461,27 +461,38 @@ static int __do_page_fault(struct pt_regs *regs, unsigned long address,
 
 	count_vm_event(SPF_ATTEMPT);
 	seq = mmap_seq_read_start(mm);
-	if (seq & 1)
+	if (seq & 1) {
+		count_vm_event(SPF_ABORT_ODD);
 		goto spf_abort;
+	}
 	rcu_read_lock();
 	vma = find_vma(mm, address);
-	if (!vma || vma->vm_start > address ||
-	    !vma_can_speculate(vma, flags)) {
+	if (!vma || vma->vm_start > address) {
 		rcu_read_unlock();
+		count_vm_event(SPF_ABORT_UNMAPPED);
+		goto spf_abort;
+	}
+	if (!vma_can_speculate(vma, flags)) {
+		rcu_read_unlock();
+		count_vm_event(SPF_ABORT_NO_SPECULATE);
 		goto spf_abort;
 	}
 	pvma = *vma;
 	rcu_read_unlock();
-	if (!mmap_seq_read_check(mm, seq))
+	if (!mmap_seq_read_check(mm, seq, SPF_ABORT_VMA_COPY))
 		goto spf_abort;
 	vma = &pvma;
 #ifdef CONFIG_PPC_MEM_KEYS
 	if (unlikely(access_pkey_error(is_write, is_exec,
-				       (error_code & DSISR_KEYFAULT), vma)))
+				       (error_code & DSISR_KEYFAULT), vma))) {
+		count_vm_event(SPF_ABORT_ACCESS_ERROR);
 		goto spf_abort;
+	}
 #endif /* CONFIG_PPC_MEM_KEYS */
-	if (unlikely(access_error(is_write, is_exec, vma)))
+	if (unlikely(access_error(is_write, is_exec, vma))) {
+		count_vm_event(SPF_ABORT_ACCESS_ERROR);
 		goto spf_abort;
+	}
 	fault = do_handle_mm_fault(vma, address,
 				   flags | FAULT_FLAG_SPECULATIVE, seq, regs);
 	major |= fault & VM_FAULT_MAJOR;
