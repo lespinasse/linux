@@ -4132,10 +4132,27 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 		smp_wmb(); /* See comment in __pte_alloc() */
 	}
 
+	rcu_read_lock();
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+		if (!pte_map_lock(vmf))
+			goto rcu_unlock;
+		/*
+		 * pte_map_lock() mapped the page table.
+		 * It also verified that the vma we fetched at the
+		 * start of the fault was still current at that point
+		 * in time.
+		 * If another thread changes vma mappings, the page table lock
+		 * ensures we are correctly serialized against it.
+		 * The rcu read lock ensures vmf->vma->vm_file stays valid.
+		 */
+	}
 	vmf->vma->vm_ops->map_pages(vmf, start_pgoff, end_pgoff);
+rcu_unlock:
+	rcu_read_unlock();
 
 	/* Huge page is mapped? Page fault is solved */
-	if (pmd_trans_huge(*vmf->pmd)) {
+	if (!(vmf->flags & FAULT_FLAG_SPECULATIVE) &&
+	    pmd_trans_huge(*vmf->pmd)) {
 		ret = VM_FAULT_NOPAGE;
 		goto out;
 	}
@@ -4148,6 +4165,8 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 	vmf->pte -= (vmf->address >> PAGE_SHIFT) - (address >> PAGE_SHIFT);
 	if (!pte_none(*vmf->pte))
 		ret = VM_FAULT_NOPAGE;
+	else if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		ret = VM_FAULT_RETRY;
 	pte_unmap_unlock(vmf->pte, vmf->ptl);
 out:
 	vmf->address = address;
