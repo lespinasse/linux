@@ -4133,8 +4133,14 @@ static vm_fault_t do_cow_fault(struct vm_fault *vmf)
 	struct vm_area_struct *vma = vmf->vma;
 	vm_fault_t ret;
 
-	if (unlikely(anon_vma_prepare(vma)))
-		return VM_FAULT_OOM;
+	if (unlikely(!vma->anon_vma)) {
+		if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+			count_vm_spf_event(SPF_ABORT_ANON_VMA);
+			return VM_FAULT_RETRY;
+		}
+		if (__anon_vma_prepare(vma))
+			return VM_FAULT_OOM;
+	}
 
 	vmf->cow_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, vmf->address);
 	if (!vmf->cow_page)
@@ -4170,6 +4176,8 @@ static vm_fault_t do_shared_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	vm_fault_t ret, tmp;
+
+	VM_BUG_ON(vmf->flags & FAULT_FLAG_SPECULATIVE);
 
 	ret = __do_fault(vmf);
 	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY)))
@@ -4215,12 +4223,15 @@ static vm_fault_t do_fault(struct vm_fault *vmf)
 	struct mm_struct *vm_mm = vma->vm_mm;
 	vm_fault_t ret;
 
-	VM_BUG_ON(vmf->flags & FAULT_FLAG_SPECULATIVE);
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		count_vm_spf_event(SPF_ATTEMPT_FILE);
 
 	/*
 	 * The VMA was not fully populated on mmap() or missing VM_DONTEXPAND
 	 */
 	if (!vma->vm_ops->fault) {
+		VM_BUG_ON(vmf->flags & FAULT_FLAG_SPECULATIVE);
+
 		/*
 		 * If we find a migration pmd entry or a none pmd entry, which
 		 * should never happen, return SIGBUS
@@ -4796,7 +4807,8 @@ vm_fault_t do_handle_mm_fault(struct vm_area_struct *vma,
 {
 	vm_fault_t ret;
 
-	VM_BUG_ON((flags & FAULT_FLAG_SPECULATIVE) && !vma_is_anonymous(vma));
+	VM_BUG_ON((flags & FAULT_FLAG_SPECULATIVE) &&
+		  !vma_can_speculate(vma, flags));
 
 	__set_current_state(TASK_RUNNING);
 
