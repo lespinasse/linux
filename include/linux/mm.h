@@ -450,6 +450,7 @@ extern pgprot_t protection_map[16];
  * @FAULT_FLAG_REMOTE: The fault is not for current task/mm.
  * @FAULT_FLAG_INSTRUCTION: The fault was during an instruction fetch.
  * @FAULT_FLAG_INTERRUPTIBLE: The fault can be interrupted by non-fatal signals.
+ * @FAULT_FLAG_SPECULATIVE: The fault is handled without holding the mmap_sem.
  *
  * About @FAULT_FLAG_ALLOW_RETRY and @FAULT_FLAG_TRIED: we can specify
  * whether we would allow page faults to retry by specifying these two
@@ -481,6 +482,7 @@ enum fault_flag {
 	FAULT_FLAG_REMOTE =		1 << 7,
 	FAULT_FLAG_INSTRUCTION =	1 << 8,
 	FAULT_FLAG_INTERRUPTIBLE =	1 << 9,
+	FAULT_FLAG_SPECULATIVE =	1 << 10,
 };
 
 /*
@@ -520,7 +522,8 @@ static inline bool fault_flag_allow_retry_first(enum fault_flag flags)
 	{ FAULT_FLAG_USER,		"USER" }, \
 	{ FAULT_FLAG_REMOTE,		"REMOTE" }, \
 	{ FAULT_FLAG_INSTRUCTION,	"INSTRUCTION" }, \
-	{ FAULT_FLAG_INTERRUPTIBLE,	"INTERRUPTIBLE" }
+	{ FAULT_FLAG_INTERRUPTIBLE,	"INTERRUPTIBLE" }, \
+	{ FAULT_FLAG_SPECULATIVE,	"SPECULATIVE" }
 
 /*
  * vm_fault is filled by the pagefault handler and passed to the vma's
@@ -541,6 +544,10 @@ struct vm_fault {
 	};
 	enum fault_flag flags;		/* FAULT_FLAG_xxx flags
 					 * XXX: should really be 'const' */
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	unsigned long seq;
+	pmd_t orig_pmd;
+#endif
 	pmd_t *pmd;			/* Pointer to pmd entry matching
 					 * the 'address' */
 	pud_t *pud;			/* Pointer to pud entry matching
@@ -1760,9 +1767,15 @@ int generic_error_remove_page(struct address_space *mapping, struct page *page);
 int invalidate_inode_page(struct page *page);
 
 #ifdef CONFIG_MMU
-extern vm_fault_t handle_mm_fault(struct vm_area_struct *vma,
-				  unsigned long address, unsigned int flags,
-				  struct pt_regs *regs);
+extern vm_fault_t do_handle_mm_fault(struct vm_area_struct *vma,
+		unsigned long address, unsigned int flags,
+		unsigned long seq, struct pt_regs *regs);
+static inline vm_fault_t handle_mm_fault(struct vm_area_struct *vma,
+		unsigned long address, unsigned int flags,
+		struct pt_regs *regs)
+{
+	return do_handle_mm_fault(vma, address, flags, 0, regs);
+}
 extern int fixup_user_fault(struct mm_struct *mm,
 			    unsigned long address, unsigned int fault_flags,
 			    bool *unlocked);
@@ -3253,6 +3266,42 @@ void mem_dump_obj(void *object);
 #else
 static inline void mem_dump_obj(void *object) {}
 #endif
+
+#ifdef CONFIG_MMU
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+
+bool __pte_map_lock(struct vm_fault *vmf);
+
+static inline bool pte_map_lock(struct vm_fault *vmf)
+{
+	VM_BUG_ON(vmf->pte);
+	return __pte_map_lock(vmf);
+}
+
+static inline bool pte_spinlock(struct vm_fault *vmf)
+{
+	VM_BUG_ON(!vmf->pte);
+	return __pte_map_lock(vmf);
+}
+
+#else	/* !CONFIG_SPECULATIVE_PAGE_FAULT */
+
+static inline bool pte_map_lock(struct vm_fault *vmf)
+{
+	vmf->pte = pte_offset_map_lock(vmf->vma->vm_mm, vmf->pmd, vmf->address,
+				       &vmf->ptl);
+	return true;
+}
+
+static inline bool pte_spinlock(struct vm_fault *vmf)
+{
+	vmf->ptl = pte_lockptr(vmf->vma->vm_mm, vmf->pmd);
+	spin_lock(vmf->ptl);
+	return true;
+}
+
+#endif	/* CONFIG_SPECULATIVE_PAGE_FAULT */
+#endif	/* CONFIG_MMU */
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_MM_H */

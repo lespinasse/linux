@@ -301,13 +301,23 @@ struct vm_userfaultfd_ctx {};
  * per VM-area/task. A VM area is any part of the process virtual memory
  * space that has a special rule for the page-fault handlers (ie a shared
  * library, the executable area etc).
+ *
+ * Note that speculative page faults make an on-stack copy of the VMA,
+ * so the structure size matters.
+ * (TODO - it would be preferable to copy only the required vma attributes
+ *  rather than the entire vma).
  */
 struct vm_area_struct {
-	unsigned long vm_start;		/* Our start address within vm_mm. */
-	unsigned long vm_end;		/* The first byte after our end address
-					   within vm_mm. */
+	union {
+		struct {
+			/* VMA covers [vm_start; vm_end) addresses within mm */
+			unsigned long vm_start, vm_end;
+		};
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+		struct rcu_head vm_rcu;	/* Used for deferred freeing. */
+#endif
+	};
 
-	/* linked list of VM areas per task, sorted by address */
 	struct mm_struct *vm_mm;	/* The address space we belong to. */
 
 	/*
@@ -446,6 +456,10 @@ struct mm_struct {
 					     * counters
 					     */
 		struct rw_semaphore mmap_lock;
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+		unsigned long mmap_seq;
+#endif
+
 
 		struct list_head mmlist; /* List of maybe swapped mm's.	These
 					  * are globally strung together off
