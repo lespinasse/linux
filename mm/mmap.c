@@ -176,9 +176,8 @@ static void remove_vma(struct vm_area_struct *vma)
 	might_sleep();
 	if (vma->vm_ops && vma->vm_ops->close)
 		vma->vm_ops->close(vma);
-	if (vma->vm_file)
-		fput(vma->vm_file);
 	mpol_put(vma_policy(vma));
+	/* fput(vma->vm_file) happens in vm_area_free after an RCU delay. */
 	vm_area_free(vma);
 }
 
@@ -595,7 +594,8 @@ inline int vma_expand(struct ma_state *mas, struct vm_area_struct *vma,
 	if (remove_next) {
 		if (file) {
 			uprobe_munmap(next, next->vm_start, next->vm_end);
-			fput(file);
+			/* fput(file) happens whthin vm_area_free(next) */
+			VM_BUG_ON(file != next->vm_file);
 		}
 		if (next->anon_vma)
 			anon_vma_merge(vma, next);
@@ -814,7 +814,7 @@ again:
 	if (remove_next) {
 		if (file) {
 			uprobe_munmap(next, next->vm_start, next->vm_end);
-			fput(file);
+			/* fput happens within vm_area_free */
 		}
 		if (next->anon_vma)
 			anon_vma_merge(vma, next);
@@ -2355,6 +2355,7 @@ int mas_split_vma(struct mm_struct *mm, struct ma_state *mas,
  out_free_mpol:
 	mpol_put(vma_policy(new));
  out_free_vma:
+	new->vm_file = NULL;	/* prevents fput within vm_area_free() */
 	vm_area_free(new);
 	return err;
 }
@@ -2419,6 +2420,7 @@ int __split_vma(struct mm_struct *mm, struct vm_area_struct *vma,
  out_free_mpol:
 	mpol_put(vma_policy(new));
  out_free_vma:
+	new->vm_file = NULL;	/* Prevent fput within vm_area_free */
 	vm_area_free(new);
 	return err;
 }
@@ -2797,7 +2799,7 @@ cannot_expand:
 				 * fput the vma->vm_file here or we would add an extra fput for file
 				 * and cause general protection fault ultimately.
 				 */
-				fput(vma->vm_file);
+				/* fput happens within vm_area_free */
 				vm_area_free(vma);
 				vma = prev;
 				/* Update vm_flags and possible addr to pick up the change. We don't
@@ -2882,6 +2884,7 @@ allow_write_and_free_vma:
 	if (vm_flags & VM_DENYWRITE)
 		allow_write_access(file);
 free_vma:
+	VM_BUG_ON(vma->vm_file);
 	vm_area_free(vma);
 unacct_error:
 	if (charged)
@@ -3471,6 +3474,7 @@ struct vm_area_struct *copy_vma(struct vm_area_struct **vmap,
 out_free_mempol:
 	mpol_put(vma_policy(new_vma));
 out_free_vma:
+	new_vma->vm_file = NULL;	/* prevents fput within vm_area_free() */
 	vm_area_free(new_vma);
 out:
 	return NULL;

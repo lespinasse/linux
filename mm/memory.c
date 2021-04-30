@@ -3808,29 +3808,51 @@ static vm_fault_t __do_fault(struct vm_fault *vmf)
 	struct vm_area_struct *vma = vmf->vma;
 	vm_fault_t ret;
 
-	/*
-	 * Preallocate pte before we take page_lock because this might lead to
-	 * deadlocks for memcg reclaim which waits for pages under writeback:
-	 *				lock_page(A)
-	 *				SetPageWriteback(A)
-	 *				unlock_page(A)
-	 * lock_page(B)
-	 *				lock_page(B)
-	 * pte_alloc_one
-	 *   shrink_page_list
-	 *     wait_on_page_writeback(A)
-	 *				SetPageWriteback(B)
-	 *				unlock_page(B)
-	 *				# flush A, B to clear the writeback
-	 */
-	if (pmd_none(*vmf->pmd) && !vmf->prealloc_pte) {
-		vmf->prealloc_pte = pte_alloc_one(vma->vm_mm);
-		if (!vmf->prealloc_pte)
-			return VM_FAULT_OOM;
-		smp_wmb(); /* See comment in __pte_alloc() */
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+		rcu_read_lock();
+		if (!mmap_seq_read_check(vmf->vma->vm_mm, vmf->seq,
+					 SPF_ABORT_FAULT)) {
+			ret = VM_FAULT_RETRY;
+		} else {
+			/*
+			 * The mmap sequence count check guarantees that the
+			 * vma we fetched at the start of the fault was still
+			 * current at that point in time. The rcu read lock
+			 * ensures vmf->vma->vm_file stays valid.
+			 */
+			ret = vma->vm_ops->fault(vmf);
+		}
+		rcu_read_unlock();
+	} else
+#endif
+	{
+		/*
+		 * Preallocate pte before we take page_lock because
+		 * this might lead to deadlocks for memcg reclaim
+		 * which waits for pages under writeback:
+		 *				lock_page(A)
+		 *				SetPageWriteback(A)
+		 *				unlock_page(A)
+		 * lock_page(B)
+		 *				lock_page(B)
+		 * pte_alloc_one
+		 *   shrink_page_list
+		 *     wait_on_page_writeback(A)
+		 *				SetPageWriteback(B)
+		 *				unlock_page(B)
+		 *				# flush A, B to clear writeback
+		 */
+		if (pmd_none(*vmf->pmd) && !vmf->prealloc_pte) {
+			vmf->prealloc_pte = pte_alloc_one(vma->vm_mm);
+			if (!vmf->prealloc_pte)
+				return VM_FAULT_OOM;
+			smp_wmb(); /* See comment in __pte_alloc() */
+		}
+
+		ret = vma->vm_ops->fault(vmf);
 	}
 
-	ret = vma->vm_ops->fault(vmf);
 	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY |
 			    VM_FAULT_DONE_COW)))
 		return ret;
@@ -3993,23 +4015,25 @@ vm_fault_t finish_fault(struct vm_fault *vmf)
 			return ret;
 	}
 
-	if (pmd_none(*vmf->pmd)) {
-		if (PageTransCompound(page)) {
-			ret = do_set_pmd(vmf, page);
-			if (ret != VM_FAULT_FALLBACK)
-				return ret;
+	if (!(vmf->flags & FAULT_FLAG_SPECULATIVE)) {
+		if (pmd_none(*vmf->pmd)) {
+			if (PageTransCompound(page)) {
+				ret = do_set_pmd(vmf, page);
+				if (ret != VM_FAULT_FALLBACK)
+					return ret;
+			}
+
+			if (unlikely(pte_alloc(vma->vm_mm, vmf->pmd)))
+				return VM_FAULT_OOM;
 		}
 
-		if (unlikely(pte_alloc(vma->vm_mm, vmf->pmd)))
-			return VM_FAULT_OOM;
+		/* See comment in __handle_mm_fault() */
+		if (pmd_devmap_trans_unstable(vmf->pmd))
+			return 0;
 	}
 
-	/* See comment in __handle_mm_fault() */
-	if (pmd_devmap_trans_unstable(vmf->pmd))
-		return 0;
-
-	vmf->pte = pte_offset_map_lock(vma->vm_mm, vmf->pmd,
-				      vmf->address, &vmf->ptl);
+	if (!pte_map_lock(vmf))
+		return VM_FAULT_RETRY;
 	ret = 0;
 	/* Re-check under ptl */
 	if (likely(pte_none(*vmf->pte)))
@@ -4088,6 +4112,7 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 	pgoff_t start_pgoff = vmf->pgoff;
 	pgoff_t end_pgoff;
 	int off;
+	vm_fault_t ret;
 
 	nr_pages = READ_ONCE(fault_around_bytes) >> PAGE_SHIFT;
 	mask = ~(nr_pages * PAGE_SIZE - 1) & PAGE_MASK;
@@ -4106,14 +4131,32 @@ static vm_fault_t do_fault_around(struct vm_fault *vmf)
 	end_pgoff = min3(end_pgoff, vma_pages(vmf->vma) + vmf->vma->vm_pgoff - 1,
 			start_pgoff + nr_pages - 1);
 
-	if (pmd_none(*vmf->pmd)) {
+	if (!(vmf->flags & FAULT_FLAG_SPECULATIVE) &&
+	    pmd_none(*vmf->pmd)) {
 		vmf->prealloc_pte = pte_alloc_one(vmf->vma->vm_mm);
 		if (!vmf->prealloc_pte)
 			return VM_FAULT_OOM;
 		smp_wmb(); /* See comment in __pte_alloc() */
 	}
 
-	return vmf->vma->vm_ops->map_pages(vmf, start_pgoff, end_pgoff);
+	rcu_read_lock();
+#ifdef CONFIG_SPECULATIVE_PAGE_FAULT
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+		if (!mmap_seq_read_check(vmf->vma->vm_mm, vmf->seq,
+					 SPF_ABORT_FAULT)) {
+			rcu_read_unlock();
+			return VM_FAULT_RETRY;
+		}
+		/*
+		 * the mmap sequence check verified that vmf->vma was still
+		 * current at that point in time.
+		 * The rcu read lock ensures vmf->vma->vm_file stays valid.
+		 */
+	}
+#endif
+	ret = vmf->vma->vm_ops->map_pages(vmf, start_pgoff, end_pgoff);
+	rcu_read_unlock();
+	return ret;
 }
 
 static vm_fault_t do_read_fault(struct vm_fault *vmf)
@@ -4148,8 +4191,14 @@ static vm_fault_t do_cow_fault(struct vm_fault *vmf)
 	struct vm_area_struct *vma = vmf->vma;
 	vm_fault_t ret;
 
-	if (unlikely(anon_vma_prepare(vma)))
-		return VM_FAULT_OOM;
+	if (unlikely(!vma->anon_vma)) {
+		if (vmf->flags & FAULT_FLAG_SPECULATIVE) {
+			count_vm_spf_event(SPF_ABORT_ANON_VMA);
+			return VM_FAULT_RETRY;
+		}
+		if (__anon_vma_prepare(vma))
+			return VM_FAULT_OOM;
+	}
 
 	vmf->cow_page = alloc_page_vma(GFP_HIGHUSER_MOVABLE, vma, vmf->address);
 	if (!vmf->cow_page)
@@ -4185,6 +4234,8 @@ static vm_fault_t do_shared_fault(struct vm_fault *vmf)
 {
 	struct vm_area_struct *vma = vmf->vma;
 	vm_fault_t ret, tmp;
+
+	VM_BUG_ON(vmf->flags & FAULT_FLAG_SPECULATIVE);
 
 	ret = __do_fault(vmf);
 	if (unlikely(ret & (VM_FAULT_ERROR | VM_FAULT_NOPAGE | VM_FAULT_RETRY)))
@@ -4230,12 +4281,15 @@ static vm_fault_t do_fault(struct vm_fault *vmf)
 	struct mm_struct *vm_mm = vma->vm_mm;
 	vm_fault_t ret;
 
-	VM_BUG_ON(vmf->flags & FAULT_FLAG_SPECULATIVE);
+	if (vmf->flags & FAULT_FLAG_SPECULATIVE)
+		count_vm_spf_event(SPF_ATTEMPT_FILE);
 
 	/*
 	 * The VMA was not fully populated on mmap() or missing VM_DONTEXPAND
 	 */
 	if (!vma->vm_ops->fault) {
+		VM_BUG_ON(vmf->flags & FAULT_FLAG_SPECULATIVE);
+
 		/*
 		 * If we find a migration pmd entry or a none pmd entry, which
 		 * should never happen, return SIGBUS
@@ -4809,7 +4863,8 @@ vm_fault_t do_handle_mm_fault(struct vm_area_struct *vma,
 {
 	vm_fault_t ret;
 
-	VM_BUG_ON((flags & FAULT_FLAG_SPECULATIVE) && !vma_is_anonymous(vma));
+	VM_BUG_ON((flags & FAULT_FLAG_SPECULATIVE) &&
+		  !vma_can_speculate(vma, flags));
 
 	__set_current_state(TASK_RUNNING);
 

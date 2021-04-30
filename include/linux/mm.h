@@ -660,6 +660,13 @@ struct vm_operations_struct {
 	 */
 	struct page *(*find_special_page)(struct vm_area_struct *vma,
 					  unsigned long addr);
+	/*
+	 * speculative indicates that the vm_operations support
+	 * speculative page faults. This allows ->fault and ->map_pages
+	 * to be called with FAULT_FLAG_SPECULATIVE set; such calls will
+	 * run within an rcu read locked section and with mmap lock not held.
+	 */
+	bool speculative;
 };
 
 static inline void vma_init(struct vm_area_struct *vma, struct mm_struct *mm)
@@ -710,6 +717,20 @@ static inline bool vma_is_foreign(struct vm_area_struct *vma)
 static inline bool vma_is_accessible(struct vm_area_struct *vma)
 {
 	return vma->vm_flags & VM_ACCESS_FLAGS;
+}
+
+static inline bool vma_can_speculate(struct vm_area_struct *vma,
+		unsigned int flags)
+{
+	if (vma_is_anonymous(vma))
+		return true;
+	if (!vma->vm_ops->speculative)
+		return false;
+	if (!(flags & FAULT_FLAG_WRITE))
+		return true;
+	if (!(vma->vm_flags & VM_SHARED))
+		return true;
+	return false;
 }
 
 #ifdef CONFIG_SHMEM
