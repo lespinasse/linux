@@ -7,7 +7,7 @@
 #include <linux/rwsem.h>
 #include <linux/tracepoint-defs.h>
 #include <linux/types.h>
-#include <linux/vmstat.h>
+#include <linux/vm_event.h>
 
 #ifdef CONFIG_SPECULATIVE_PAGE_FAULT
 #define MMAP_LOCK_SEQ_INITIALIZER(name) \
