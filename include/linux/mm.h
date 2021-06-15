@@ -3202,19 +3202,21 @@ static inline bool pte_spinlock(struct vm_fault *vmf)
 
 #else	/* !CONFIG_SPECULATIVE_PAGE_FAULT */
 
-static inline bool pte_map_lock(struct vm_fault *vmf)
-{
-	vmf->pte = pte_offset_map_lock(vmf->vma->vm_mm, vmf->pmd, vmf->address,
-				       &vmf->ptl);
-	return true;
-}
+#define pte_map_lock(__vmf)						\
+({									\
+	struct vm_fault *vmf = __vmf;					\
+	vmf->pte = pte_offset_map_lock(vmf->vma->vm_mm, vmf->pmd,	\
+				       vmf->address, &vmf->ptl);	\
+	true;								\
+})
 
-static inline bool pte_spinlock(struct vm_fault *vmf)
-{
-	vmf->ptl = pte_lockptr(vmf->vma->vm_mm, vmf->pmd);
-	spin_lock(vmf->ptl);
-	return true;
-}
+#define pte_spinlock(__vmf)						\
+({									\
+	struct vm_fault *vmf = __vmf;					\
+	vmf->ptl = pte_lockptr(vmf->vma->vm_mm, vmf->pmd);		\
+	spin_lock(vmf->ptl);						\
+	true;								\
+})
 
 #endif	/* CONFIG_SPECULATIVE_PAGE_FAULT */
 #endif	/* CONFIG_MMU */
