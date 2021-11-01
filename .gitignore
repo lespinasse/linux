@@ -96,6 +96,7 @@ modules.order
 !.gitattributes
 !.gitignore
 !.mailmap
+!/.force_werror
 
 #
 # Generated include files
